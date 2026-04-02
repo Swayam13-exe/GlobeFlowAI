@@ -1,54 +1,29 @@
-RULES = {
-    "Germany": {
-        "requires_visa": True,
-        "requires_tax": True,
-        "requires_payroll": False,
-        "requires_pdpa": False,
-        "requires_shadow_payroll": False
-    },
-    "Singapore": {
-        "requires_visa": True,
-        "requires_tax": False,
-        "requires_payroll": True,
-        "requires_pdpa": True,
-        "requires_shadow_payroll": True
-    },
-    "UAE": {
-        "requires_visa": True,
-        "requires_tax": False,
-        "requires_payroll": True,
-        "requires_pdpa": False,
-        "requires_shadow_payroll": False
-    }
-}
+"""
+env/rules.py
+============
+Re-export layer for the rules engine.
 
-def get_country_rules(countries: list[str]) -> dict:
-    combined_rules = {
-        "requires_visa": False,
-        "requires_tax": False,
-        "requires_payroll": False,
-        "requires_pdpa": False,
-        "requires_shadow_payroll": False,
-        "tax_forbidden": False,
-    }
-    
-    for country in countries:
-        if country not in RULES:
-            continue
-            
-        rules = RULES[country]
-        if rules["requires_visa"]:
-            combined_rules["requires_visa"] = True
-        if rules["requires_tax"]:
-            combined_rules["requires_tax"] = True
-        if rules["requires_payroll"]:
-            combined_rules["requires_payroll"] = True
-        if rules["requires_pdpa"]:
-            combined_rules["requires_pdpa"] = True
-        if rules["requires_shadow_payroll"]:
-            combined_rules["requires_shadow_payroll"] = True
-            
-        if country == "UAE":
-            combined_rules["tax_forbidden"] = True
-            
-    return combined_rules
+All actual rule data and logic lives in env/rules_engine.py.
+This module provides the canonical import path used by environment.py
+and other env/ modules:
+
+    from env.rules import COUNTRY_RULES, DEPARTMENT_DEPENDENCIES, REQUIRED_DOCUMENTS
+
+Author: Team AI Kalesh
+"""
+
+from env.rules_engine import (  # noqa: F401  (re-exports)
+    COUNTRY_RULES,
+    DEPARTMENT_DEPENDENCIES,
+    REQUIRED_COMPLIANCE,
+    REQUIRED_DOCUMENTS,
+    compute_checklist,
+    get_blockers,
+    get_blockers_summary,
+    get_required_compliance,
+    get_required_documents,
+    get_rules,
+    get_tax_treaty,
+    get_visa_info,
+    validate_action,
+)

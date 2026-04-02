@@ -1,11 +1,56 @@
-name: "GlobeFlowAI"
-description: "Global Workforce Mobility & Compliance Orchestrator OpenEnv environment"
-version: "1.0.0"
-runtime:
-  type: "docker"
-  image: "workforce"
-  port: 7860
-capabilities:
-  - "state"
-  - "reset"
-  - "step"
+# openenv-workforce metadata and task registry
+# ============================================
+# Schema: OpenEnv v1.0
+
+name: openenv-workforce
+version: 1.0.0
+description: >
+  Workforce mobility simulation environment. Agent must relocate employees
+  across countries (India → Germany / Singapore / UAE) while navigating
+  visa, tax, payroll, and compliance rules. Includes the UAE no-tax trap.
+
+entry_point: main:app
+port: 7860
+
+env:
+  reset_endpoint: POST /reset
+  step_endpoint:  POST /step
+  state_endpoint: GET  /state
+  health_endpoint: GET /
+
+tasks:
+  - id: easy
+    path: env/tasks.py::TASKS["easy"]
+    grader: graders/graders.py::grade_easy
+    description: "India → Germany | Engineer | No dependents | All docs valid"
+    countries: ["Germany"]
+    expected_score_range: [0.70, 1.00]
+    max_steps: 25
+
+  - id: medium
+    path: env/tasks.py::TASKS["medium"]
+    grader: graders/graders.py::grade_medium
+    description: "India → Singapore | Manager | Has dependents | PDPA + shadow payroll required"
+    countries: ["Singapore"]
+    expected_score_range: [0.40, 0.80]
+    max_steps: 25
+
+  - id: hard
+    path: env/tasks.py::TASKS["hard"]
+    grader: graders/graders.py::grade_hard
+    description: "India → Germany + UAE | Director | Multi-country | UAE no-tax trap"
+    countries: ["Germany", "UAE"]
+    expected_score_range: [0.20, 0.60]
+    max_steps: 25
+
+domain_rules:
+  - "Germany requires EU Blue Card visa and tax ID registration"
+  - "Singapore requires Employment Pass, PDPA consent, and shadow payroll"
+  - "UAE has NO income tax — set_tax_id:UAE is a critical rule violation"
+  - "Legal approval requires all documents to be verified first"
+  - "Finance approval requires Legal approval first"
+
+fixtures:
+  - fixtures/country_rules.json
+  - fixtures/visa_types.json
+  - fixtures/tax_treaties.json

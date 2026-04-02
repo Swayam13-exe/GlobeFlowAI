@@ -1,0 +1,11 @@
+name: "GlobeFlowAI"
+description: "Global Workforce Mobility & Compliance Orchestrator OpenEnv environment"
+version: "1.0.0"
+runtime:
+  type: "docker"
+  image: "workforce"
+  port: 7860
+capabilities:
+  - "state"
+  - "reset"
+  - "step"

@@ -9,7 +9,7 @@ description: >
   across countries (India → Germany / Singapore / UAE) while navigating
   visa, tax, payroll, and compliance rules. Includes the UAE no-tax trap.
 
-entry_point: main:app
+entrypoint: server.app:main
 port: 7860
 
 env:

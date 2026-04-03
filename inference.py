@@ -41,7 +41,7 @@ import openai
 # ---------------------------------------------------------------------------
 
 API_BASE_URL: str = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME:   str = os.environ.get("MODEL_NAME", "gpt-4o")
+MODEL_NAME:   str = os.environ.get("MODEL_NAME", "gpt-4o-mini")
 HF_TOKEN:     str | None = os.environ.get("HF_TOKEN")
 OPENAI_KEY:   str | None = os.environ.get("OPENAI_API_KEY")
 

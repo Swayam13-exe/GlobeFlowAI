@@ -15,11 +15,13 @@ license: mit
 
 ---
 
-## 📖 Overview
+## 📖 Environment Description and Motivation
 
-`openenv-workforce` is a specialized simulation environment for workforce mobility automation. Relocating an employee between countries is a high-stakes process involving multi-department approvals (HR, Legal, Finance) and strict country-specific compliance rules.
+`openenv-workforce` is a specialized simulation environment for workforce mobility automation.
 
-This environment challenges AI agents to act as **"Workforce Solutions Architects"**, making decisions that directly impact relocation timelines, costs, and legal compliance. It features a realistic **UAE no-tax trap** to test whether agents blindly follow patterns or strictly adhere to destination-specific rules.
+**Motivation:** Relocating an employee between countries is a high-stakes process involving multi-department approvals (HR, Legal, Finance) and strict country-specific compliance rules. Existing agentic benchmarks lack robust simulations for these global corporate dependency chains.
+
+**Environment Description:** This environment challenges AI agents to act as **"Workforce Solutions Architects"**, making decisions that directly impact relocation timelines, costs, and legal compliance. It features a realistic **UAE no-tax trap** to test whether agents blindly follow patterns or strictly adhere to destination-specific rules.
 
 ---
 
@@ -76,7 +78,7 @@ workforce-mobility-env/
 
 ## ⚙️ Environment Design
 
-### State
+### Observation Space (State)
 The `WorkforceState` is the single source of truth, tracking:
 - **Employee Info:** Role and dependent status.
 - **Documents:** Current status (`missing`, `submitted`, `verified`, `rejected`) and ground-truth validity.
@@ -84,7 +86,7 @@ The `WorkforceState` is the single source of truth, tracking:
 - **Compliance:** Checklist for tax registration, payroll, PDPA, and shadow payroll.
 - **Progress:** A normalized `[0.0, 1.0]` fraction of the total checklist completed.
 
-### Actions
+### Action Space
 Agents interact using a discrete action space:
 - `request_document` / `verify_document`: Manage the document lifecycle.
 - `approve_hr` / `approve_legal` / `approve_finance`: Move through the approval chain.
@@ -93,7 +95,7 @@ Agents interact using a discrete action space:
 
 ---
 
-## 🎯 Tasks
+## 🎯 Task Descriptions with Expected Difficulty
 
 ### 🟢 Easy: India → Germany (Score ceiling: 0.99)
 - **Scenario:** Single relocation of an Engineer, no dependents.
@@ -112,6 +114,18 @@ Agents interact using a discrete action space:
 - **The Trap:** UAE has **NO income tax**. Calling `set_tax_id(UAE)` loses the 15% UAE compliance weight AND incurs an additional -0.10 penalty.
 - **Expected Score:** `0.20 – 0.60`
 - **Perfect Agent Score:** ~`0.55 – 0.59`
+
+---
+
+## 🏆 Baseline Scores
+
+The environment includes baseline evaluations using OpenAI's `gpt-4o-mini` standard agent. These scores represent realistic performance within the expected difficulty boundaries:
+
+| Task | LLM Baseline (`gpt-4o-mini`) | Perfect Agent Score Ceiling |
+|------|----------------------------|--------------------------|
+| Easy | ~0.9700                    | 0.99                     |
+| Medium | ~0.7500                  | 0.79                     |
+| Hard | ~0.5500                      | 0.59                     |
 
 ---
 
@@ -171,7 +185,9 @@ All endpoints communicate using JSON with Pydantic v2 compliant schemas.
 
 ---
 
-## 🛠️ Local Installation
+## 🛠️ Setup and Usage Instructions
+
+### Local Installation
 
 ### Prerequisites
 - Python 3.11+

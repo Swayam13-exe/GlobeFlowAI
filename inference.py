@@ -220,12 +220,13 @@ def parse_action(response_text: str) -> dict[str, str] | None:
 def run_task(task_name: str) -> tuple[float, dict[str, Any]]:
     """
     Run one complete episode for the given task using the LLM agent.
+    Emits structured [START], [STEP], and [END] logs to stdout.
 
     Args:
         task_name: "easy" | "medium" | "hard"
 
     Returns:
-        (final_score: float, final_state: dict)
+        (final_score: float, final_status: str)
     """
     from env.environment import WorkforceEnv
     from graders.graders import grade
@@ -233,12 +234,18 @@ def run_task(task_name: str) -> tuple[float, dict[str, Any]]:
     env = WorkforceEnv()
     observation = env.reset(task_name=task_name)
 
-    print(f"\n{'='*60}")
-    print(f"  TASK: {task_name.upper()}")
-    print(f"  Countries: {observation.state.countries}")
-    print(f"{'='*60}")
-
     obs_dict = observation.model_dump()
+
+    # Emit [START] log
+    print(json.dumps({
+        "event": "START",
+        "task": task_name,
+        "countries": observation.state.countries,
+        "model": MODEL_NAME,
+        "api_base_url": API_BASE_URL,
+        "max_steps": MAX_STEPS_PER_TASK,
+    }))
+
     done     = False
     steps    = 0
     _captured_score:  float | None = None
@@ -260,20 +267,35 @@ def run_task(task_name: str) -> tuple[float, dict[str, Any]]:
             )
             raw_text = response.choices[0].message.content or ""
         except openai.OpenAIError as exc:
-            print(f"  [step {steps+1}] OpenAI API error: {exc}")
+            print(json.dumps({
+                "event": "STEP",
+                "task": task_name,
+                "step": steps + 1,
+                "error": str(exc),
+            }))
             break
 
         # ── Parse action ────────────────────────────────────────────────────
         action_dict = parse_action(raw_text)
         if not action_dict:
-            print(f"  [step {steps+1}] Failed to parse action from: {raw_text!r}")
+            print(json.dumps({
+                "event": "STEP",
+                "task": task_name,
+                "step": steps + 1,
+                "error": f"Failed to parse action from: {raw_text!r}",
+            }))
             break
 
         from env.models import Action
         try:
             action = Action(**action_dict)
         except Exception as exc:
-            print(f"  [step {steps+1}] Invalid action structure: {exc}")
+            print(json.dumps({
+                "event": "STEP",
+                "task": task_name,
+                "step": steps + 1,
+                "error": f"Invalid action structure: {exc}",
+            }))
             break
 
         # ── Step ─────────────────────────────────────────────────────────────
@@ -282,10 +304,18 @@ def run_task(task_name: str) -> tuple[float, dict[str, Any]]:
         reward      = step_result.reward
         done        = step_result.done
 
-        print(
-            f"  [step {steps+1:>2}] {action.action_type}:{action.target:<25} "
-            f"→ {result_code:<18} reward={reward:+.2f}"
-        )
+        # Emit [STEP] log
+        print(json.dumps({
+            "event": "STEP",
+            "task": task_name,
+            "step": steps + 1,
+            "action_type": action.action_type,
+            "target": action.target,
+            "result": result_code,
+            "reward": round(reward, 4),
+            "done": done,
+            "progress": round(obs_dict.get("state", {}).get("progress", 0.0), 4),
+        }))
 
         obs_dict = step_result.observation.model_dump()
         steps   += 1
@@ -299,9 +329,6 @@ def run_task(task_name: str) -> tuple[float, dict[str, Any]]:
         time.sleep(0.1)
 
     # ── Final grade ──────────────────────────────────────────────────────────
-    # Use the score emitted by finalize_case (captured during the loop)
-    # rather than re-grading the post-episode state. This ensures the score
-    # printed here exactly matches what the environment used to evaluate success.
     if _captured_score is not None:
         final_score = _captured_score
         final_status = _captured_status
@@ -311,8 +338,15 @@ def run_task(task_name: str) -> tuple[float, dict[str, Any]]:
         final_score = grade(task_name, final_state)
         final_status = final_state.get("status", "unknown")
 
-    print(f"\n  Final status: {final_status}")
-    print(f"  Final score:  {final_score:.4f}")
+    # Emit [END] log
+    print(json.dumps({
+        "event": "END",
+        "task": task_name,
+        "final_score": round(final_score, 4),
+        "final_status": final_status,
+        "steps_taken": steps,
+    }))
+
     return final_score, final_status
 
 

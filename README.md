@@ -15,13 +15,11 @@ license: mit
 
 ---
 
-## 📖 Environment Description and Motivation
+## 📖 Overview
 
-`openenv-workforce` is a specialized simulation environment for workforce mobility automation.
+`openenv-workforce` is a specialized simulation environment for workforce mobility automation. Relocating an employee between countries is a high-stakes process involving multi-department approvals (HR, Legal, Finance) and strict country-specific compliance rules.
 
-**Motivation:** Relocating an employee between countries is a high-stakes process involving multi-department approvals (HR, Legal, Finance) and strict country-specific compliance rules. Existing agentic benchmarks lack robust simulations for these global corporate dependency chains.
-
-**Environment Description:** This environment challenges AI agents to act as **"Workforce Solutions Architects"**, making decisions that directly impact relocation timelines, costs, and legal compliance. It features a realistic **UAE no-tax trap** to test whether agents blindly follow patterns or strictly adhere to destination-specific rules.
+This environment challenges AI agents to act as **"Workforce Solutions Architects"**, making decisions that directly impact relocation timelines, costs, and legal compliance. It features a realistic **UAE no-tax trap** to test whether agents blindly follow patterns or strictly adhere to destination-specific rules.
 
 ---
 
@@ -33,7 +31,30 @@ license: mit
 - ⚖️ **Calibrated Grading System:** Task ceilings ensure scores fall within expected brackets automatically.
 - 🧩 **Parsimony Penalties:** Agents lose points for unnecessary actions, rewarding efficient execution.
 - 🐳 **Deployment Ready:** Docker-optimized for HuggingFace Spaces and OpenEnv-compliant HTTP interfaces.
-- 🤖 **Inference Integration:** Built-in OpenAI-compatible inference runner for immediate evaluation.
+- 🤖 **Inference Integration:** Built-in OpenAI-compatible inference runner with structured stdout logging.
+
+---
+
+## 🔧 Environment Configuration Variables
+
+The following variables **must** be set before running inference:
+
+| Variable | Description | Default |
+|---|---|---|
+| `API_BASE_URL` | The API endpoint for the LLM (OpenAI-compatible) | `https://api.openai.com/v1` |
+| `MODEL_NAME` | The model identifier to use for inference | `gpt-4o` |
+| `HF_TOKEN` | Your Hugging Face / API key (takes precedence over `OPENAI_API_KEY`) | — |
+| `OPENAI_API_KEY` | Standard OpenAI API key (used if `HF_TOKEN` is not set) | — |
+
+Set them in your shell before running:
+
+```bash
+export API_BASE_URL="https://api.openai.com/v1"
+export MODEL_NAME="gpt-4o"
+export HF_TOKEN="hf_your_token_here"
+```
+
+Or add them as **Secrets** in your HuggingFace Space settings.
 
 ---
 
@@ -52,11 +73,11 @@ The system follows a standard **Agent-Environment** loop exposed via a REST API:
 ## 📁 Project Structure
 
 ```text
-workforce-mobility-env/
+openenv-workforce/
 ├── openenv.yaml        # OpenEnv metadata & task registry
 ├── Dockerfile          # FastAPI deployment config (HF Spaces port 7860)
 ├── main.py             # FastAPI application entry point
-├── inference.py        # OpenAI-compatible inference runner
+├── inference.py        # OpenAI-compatible inference runner (root directory)
 ├── requirements.txt    # Pinned dependencies
 ├── env/
 │   ├── environment.py  # Core WorkforceEnv logic
@@ -76,87 +97,97 @@ workforce-mobility-env/
 
 ---
 
-## ⚙️ Environment Design
+## ⚙️ Observation Space
 
-### Observation Space (State)
-The `WorkforceState` is the single source of truth, tracking:
-- **Employee Info:** Role and dependent status.
-- **Documents:** Current status (`missing`, `submitted`, `verified`, `rejected`) and ground-truth validity.
-- **Departments:** Approval flags for HR, Legal, and Finance.
-- **Compliance:** Checklist for tax registration, payroll, PDPA, and shadow payroll.
-- **Progress:** A normalized `[0.0, 1.0]` fraction of the total checklist completed.
+Each call to `/reset` or `/step` returns an **Observation** object with the following fields:
 
-### Action Space
-Agents interact using a discrete action space:
-- `request_document` / `verify_document`: Manage the document lifecycle.
-- `approve_hr` / `approve_legal` / `approve_finance`: Move through the approval chain.
-- `set_payroll` / `set_tax_id` / `set_pdpa` / `set_shadow_payroll`: Configure country-specific compliance.
-- `finalize_case`: Terminate the episode (valid only when all blockers are resolved).
+| Field | Type | Description |
+|---|---|---|
+| `state` | `WorkforceState` | Full environment state (see below) |
+| `available_actions` | `list[str]` | Actions valid in the current state |
+| `current_blockers` | `list[str]` | Reasons the case cannot be finalized yet |
+| `last_action_result` | `str` | Result code of the last action taken |
+| `last_action_error` | `str` | Error message if last action failed |
+| `steps_taken` | `int` | Number of steps taken so far |
+
+### WorkforceState Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `countries` | `list[str]` | Destination countries for relocation |
+| `employee_role` | `str` | Role of the employee being relocated |
+| `has_dependents` | `bool` | Whether employee has dependents |
+| `documents` | `dict` | Document name → `{status, is_valid}` |
+| `departments` | `dict` | Department name → `bool` (approved or not) |
+| `compliance` | `dict` | Compliance item → `bool` (completed or not) |
+| `progress` | `float` | Normalized `[0.0, 1.0]` checklist completion |
+| `status` | `str` | Episode status: `in_progress`, `success`, `failed` |
+| `deadline_days` | `int` | Days remaining before deadline |
 
 ---
 
-## 🎯 Task Descriptions with Expected Difficulty
+## 🎮 Action Space
+
+Agents interact using a **discrete action space** defined as `{action_type, target}` pairs:
+
+| Action Type | Valid Targets | Description |
+|---|---|---|
+| `request_document` | `passport`, `visa`, `employment_letter`, `degree_certificate` | Request a document for submission |
+| `verify_document` | `passport`, `visa`, `employment_letter`, `degree_certificate` | Verify a submitted document |
+| `approve_hr` | `HR` | Grant HR department approval |
+| `approve_legal` | `Legal` | Grant Legal department approval (requires all docs verified) |
+| `approve_finance` | `Finance` | Grant Finance approval (requires Legal approval first) |
+| `set_payroll` | `Germany`, `Singapore`, `UAE` | Register payroll for destination country |
+| `set_tax_id` | `Germany`, `Singapore` | Register tax ID (**never UAE** — UAE has no income tax) |
+| `set_shadow_payroll` | `Singapore` | Configure shadow payroll (Singapore only) |
+| `set_pdpa` | `Singapore` | Set PDPA consent (Singapore only) |
+| `finalize_case` | `all` | Complete the episode (valid only when all blockers resolved) |
+
+---
+
+## 🎯 Tasks
 
 ### 🟢 Easy: India → Germany (Score ceiling: 0.99)
 - **Scenario:** Single relocation of an Engineer, no dependents.
 - **Key Challenge:** Linear path — verify 4 docs, get HR + Legal approval, register tax/payroll.
 - **Expected Score:** `0.70 – 1.00`
 - **Perfect Agent Score:** ~`0.96 – 0.99`
+- **Difficulty:** Easy
 
 ### 🟡 Medium: India → Singapore (Score ceiling: 0.79)
 - **Scenario:** Manager with dependents relocating to Singapore.
 - **Key Challenge:** Compliance density — PDPA consent, shadow payroll, correct Employment Pass visa. Degree certificate is a **trap** (not required, attempting it costs parsimony points).
 - **Expected Score:** `0.40 – 0.80`
 - **Perfect Agent Score:** ~`0.75 – 0.79`
+- **Difficulty:** Medium
 
 ### 🔴 Hard: India → Germany + UAE (Score ceiling: 0.59)
 - **Scenario:** Simultaneous relocation of a Director to **two** countries.
 - **The Trap:** UAE has **NO income tax**. Calling `set_tax_id(UAE)` loses the 15% UAE compliance weight AND incurs an additional -0.10 penalty.
 - **Expected Score:** `0.20 – 0.60`
 - **Perfect Agent Score:** ~`0.55 – 0.59`
+- **Difficulty:** Hard
 
 ---
 
-## 🏆 Baseline Scores
+## 📊 Baseline Scores
 
-The environment includes baseline evaluations using OpenAI's `gpt-4o-mini` standard agent. These scores represent realistic performance within the expected difficulty boundaries:
+| Task | Expected Range | Perfect Agent | Difficulty |
+|------|---------------|--------------|------------|
+| Easy (India → Germany) | 0.70 – 1.00 | ~0.96 – 0.99 | 🟢 Easy |
+| Medium (India → Singapore) | 0.40 – 0.80 | ~0.75 – 0.79 | 🟡 Medium |
+| Hard (India → Germany + UAE) | 0.20 – 0.60 | ~0.55 – 0.59 | 🔴 Hard |
 
-| Task | LLM Baseline (`gpt-4o-mini`) | Perfect Agent Score Ceiling |
-|------|----------------------------|--------------------------|
-| Easy | ~0.9700                    | 0.99                     |
-| Medium | ~0.7500                  | 0.79                     |
-| Hard | ~0.5500                      | 0.59                     |
-
----
-
-## 📊 Scoring Architecture (v2.0 — Calibrated)
-
-### How Scores Are Calculated
+### Scoring Architecture
 
 | Stage | What Happens |
 |-------|-------------|
 | **1. Component Scoring** | Each required action contributes weighted points (docs, depts, compliance) |
 | **2. Penalties** | Wrong visa type (-0.05), UAE tax called (-0.10 extra), junk actions (-0.03 each) |
-| **3. Ceiling Clamp** | Score is clamped to the task-specific ceiling (`easy=0.99`, `medium=0.79`, `hard=0.59`) |
-| **4. Range Check** | `finalize_case` compares this score with the expected bracket to determine `success`/`failed` |
+| **3. Ceiling Clamp** | Score is clamped to task-specific ceiling (`easy=0.99`, `medium=0.79`, `hard=0.59`) |
+| **4. Range Check** | `finalize_case` compares score with expected bracket to determine `success`/`failed` |
 
-### Why Ceilings?
-
-The ceilings ensure that a **perfect agent** always lands **within** the expected score bracket:
-```
-Task    Bracket       Ceiling   Perfect Agent
-──────  ────────────  ───────   ─────────────
-easy    0.70 – 1.00   0.99      ~0.96–0.99
-medium  0.40 – 0.80   0.79      ~0.75–0.79
-hard    0.20 – 0.60   0.59      ~0.55–0.59
-```
-
-### Parsimony Penalty
-Each **unnecessary action** (e.g., verifying `degree_certificate` for Singapore) costs `-0.03` in raw score, up to a maximum of `-0.15`. This rewards efficient agents.
-
----
-
-## 💰 Step Reward System
+### Step Reward System
 
 | Action Result | Reward | Description |
 |---------------|--------|-------------|
@@ -168,13 +199,9 @@ Each **unnecessary action** (e.g., verifying `degree_certificate` for Singapore)
 | **Rule Violation** | `-0.3` | Violating country rules (e.g. UAE Tax ID) |
 | **Invalid Action** | `-0.4` | Malformed or unknown action |
 
-*All rewards are clamped to `[-1.0, 1.0]` per step.*
-
 ---
 
 ## 🌐 API Endpoints
-
-All endpoints communicate using JSON with Pydantic v2 compliant schemas.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -185,17 +212,16 @@ All endpoints communicate using JSON with Pydantic v2 compliant schemas.
 
 ---
 
-## 🛠️ Setup and Usage Instructions
-
-### Local Installation
+## 🛠️ Local Installation
 
 ### Prerequisites
 - Python 3.11+
 - pip
+- Docker (for containerized deployment)
 
 ```bash
 # Clone the repository
-git clone https://huggingface.co/spaces/YOUR_USERNAME/openenv-workforce
+git clone https://huggingface.co/spaces/Swayam14/openenv-workforce
 cd openenv-workforce
 
 # Create virtual environment
@@ -206,6 +232,11 @@ venv\Scripts\activate.bat     # Windows
 # Install dependencies
 pip install -r requirements.txt
 
+# Set environment variables
+export API_BASE_URL="https://api.openai.com/v1"
+export MODEL_NAME="gpt-4o"
+export HF_TOKEN="your_token_here"
+
 # Start the server
 uvicorn main:app --host 0.0.0.0 --port 7860
 ```
@@ -215,111 +246,48 @@ uvicorn main:app --host 0.0.0.0 --port 7860
 ## 🐳 Docker Usage
 
 ```bash
-# Build the application
+# Build the image
 docker build -t openenv-workforce .
 
-# Run the API server
-docker run -p 7860:7860 openenv-workforce
+# Run with environment variables
+docker run -p 7860:7860 \
+  -e API_BASE_URL="https://api.openai.com/v1" \
+  -e MODEL_NAME="gpt-4o" \
+  -e HF_TOKEN="your_token_here" \
+  openenv-workforce
 ```
 
 ---
 
-## 🤗 Deploying to HuggingFace Spaces
+## 🤖 Running Inference
 
-### Step-by-Step Deployment
-
-**1. Create a HuggingFace Space**
-
-Go to [huggingface.co/new-space](https://huggingface.co/new-space) and:
-- Set **Space name**: `openenv-workforce`
-- Select **SDK**: `Docker`
-- Set **Visibility**: Public (for OpenEnv evaluation) or Private
-
-**2. Push your code using Git**
+The inference script (`inference.py`) is in the root directory and emits structured logs in `[START]`, `[STEP]`, and `[END]` format:
 
 ```bash
-# Install git-lfs (required for HF)
-git lfs install
-
-# Clone your new Space repository
-git clone https://huggingface.co/spaces/YOUR_USERNAME/openenv-workforce
-cd openenv-workforce
-
-# Copy your project files into the cloned directory
-# Then commit and push:
-git add .
-git commit -m "Initial deployment: OpenEnv Workforce Mobility v1.0"
-git push
-```
-
-**3. Verify the Space is running**
-
-Once pushed, HuggingFace will automatically build the Docker image using your `Dockerfile`. You can monitor the build log in the Space's **"Factory Build"** tab.
-
-Check the API health:
-```bash
-curl https://YOUR_USERNAME-openenv-workforce.hf.space/
-# Expected: {"status": "ok", "environment": "openenv-workforce"}
-```
-
-**4. Run inference against the deployed Space**
-
-```bash
-export API_BASE_URL="https://YOUR_USERNAME-openenv-workforce.hf.space"
-export MODEL_NAME="gpt-4o-mini"
-export OPENAI_API_KEY="your-openai-key"
+export API_BASE_URL="https://api.openai.com/v1"
+export MODEL_NAME="gpt-4o"
+export HF_TOKEN="your_token_here"
 
 python inference.py
 ```
 
-**5. Add secrets (optional — for private models)**
+### Structured Log Format
 
-In your Space's **Settings → Secrets**, add:
-- `OPENAI_API_KEY` — your API key
-- `HF_TOKEN` — your HuggingFace token if using private models
+Each event is a JSON line printed to stdout:
 
----
-
-## 🤖 Running the Inference Agent Locally
-
-```bash
-# Set your OpenAI API key
-export OPENAI_API_KEY="your-key-here"
-export MODEL_NAME="gpt-4o-mini"        # or gpt-4o, gpt-3.5-turbo
-
-# Run all three tasks in sequence
-python inference.py
+**[START]** — emitted at the beginning of each task:
+```json
+{"event": "START", "task": "easy", "countries": ["Germany"], "model": "gpt-4o", "api_base_url": "...", "max_steps": 20}
 ```
 
-### Expected Output
-
+**[STEP]** — emitted after each action:
+```json
+{"event": "STEP", "task": "easy", "step": 1, "action_type": "request_document", "target": "passport", "result": "success", "reward": 0.4, "done": false, "progress": 0.1}
 ```
-Model:    gpt-4o-mini
-API URL:  https://api.openai.com/v1
-Max steps per task: 20
 
-============================================================
-  TASK: EASY
-  Countries: ['Germany']
-============================================================
-  [step  1] request_document:passport    → success   reward=+0.40
-  ...
-  [step 13] finalize_case:all            → success   reward=+0.70
-
-  Final status: success
-  Final score:  0.9700
-
-============================================================
-  OPENENV-WORKFORCE — FINAL SCORES
-============================================================
-  Task         Score  Range             Status                 Bar
-  -------------------------------------------------------
-  easy         0.9700  [0.70–1.00]       ✓ success              [███████████████████░]
-  medium       0.7500  [0.40–0.80]       ✓ success              [███████████████░░░░░]
-  hard         0.5500  [0.20–0.60]       ✓ success              [███████████░░░░░░░░░]
-  -------------------------------------------------------
-  Average      0.7567
-============================================================
+**[END]** — emitted at the end of each task:
+```json
+{"event": "END", "task": "easy", "final_score": 0.97, "final_status": "success", "steps_taken": 13}
 ```
 
 ---
@@ -334,42 +302,10 @@ Max steps per task: 20
 
 ---
 
-## 📄 API Usage Example
-
-### Reset
-```bash
-curl -X POST https://YOUR_USERNAME-openenv-workforce.hf.space/reset \
-  -H "Content-Type: application/json" \
-  -d '{"task_name": "easy"}'
-```
-
-### Step
-```bash
-curl -X POST https://YOUR_USERNAME-openenv-workforce.hf.space/step \
-  -H "Content-Type: application/json" \
-  -d '{"session_id": "YOUR_SESSION_ID", "action": {"action_type": "request_document", "target": "passport"}}'
-```
-
-### State
-```bash
-curl "https://YOUR_USERNAME-openenv-workforce.hf.space/state?session_id=YOUR_SESSION_ID"
-```
-
----
-
-## 🔮 Future Improvements
-
-- [ ] **Multi-Agent Mode:** Support for collaborative relocation cases (Agent A as HR, Agent B as Legal).
-- [ ] **Dynamic Rules:** Injecting new tax treaties at runtime via fixture endpoints.
-- [ ] **Extended Countries:** Adding support for US, UK, and India as destinations.
-- [ ] **Persistent Sessions:** Redis-backed session storage for multi-process deployments.
-
----
-
 ## ✍️ Authors
 
 - **Team AI Kalesh** - *Design & Implementation*
 
 ---
 
-*Built as an OpenEnv-compliant evaluation environment. For evaluation framework documentation, see [OpenEnv specification](https://openenv.ai).*
+*Built as an OpenEnv-compliant evaluation environment for the OpenEnv Hackathon.*

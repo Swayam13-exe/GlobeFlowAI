@@ -59,6 +59,20 @@ _TASK_DEPARTMENTS: dict[str, list[str]] = {
 }
 
 # ---------------------------------------------------------------------------
+# Task score ceilings — enforces difficulty ordering easy > medium > hard
+# A perfect agent scores AT MOST this value, ensuring:
+#   easy   ~0.78-0.95  (straightforward, few steps)
+#   medium ~0.55-0.75  (more compliance, harder)
+#   hard   ~0.40-0.60  (multi-country, conflicts)
+# ---------------------------------------------------------------------------
+
+_TASK_CEILING: dict[str, float] = {
+    "easy":   0.95,
+    "medium": 0.75,
+    "hard":   0.60,
+}
+
+# ---------------------------------------------------------------------------
 # Valid actions per task — used for parsimony penalty
 # FIX 7: department/finalize actions stored WITHOUT target (matches to_key())
 # ---------------------------------------------------------------------------
@@ -217,7 +231,7 @@ def grade_easy(state: dict[str, Any]) -> float:
     # Parsimony penalty
     raw -= _parsimony_penalty(prev_acts, _EASY_VALID_ACTIONS)
 
-    return round(max(0.0, min(1.0, raw)), 4)
+    return round(max(0.0, min(_TASK_CEILING["easy"], raw)), 4)
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +283,7 @@ def grade_medium(state: dict[str, Any]) -> float:
     # Parsimony penalty
     raw -= _parsimony_penalty(prev_acts, _MEDIUM_VALID_ACTIONS)
 
-    return round(max(0.0, min(1.0, raw)), 4)
+    return round(max(0.0, min(_TASK_CEILING["medium"], raw)), 4)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +307,27 @@ def grade_medium(state: dict[str, Any]) -> float:
 # ---------------------------------------------------------------------------
 
 def grade_hard(state: dict[str, Any]) -> float:
+    """
+    Hard grader — India → Germany + UAE.
+
+    Calibrated so:
+      - Empty state:   ~0.00
+      - Perfect agent: ~0.55 (inside 0.20-0.60 range)
+      - UAE tax violation: drops below 0.20
+
+    Weights (sum = 0.90, ceiling = 0.60):
+      Documents verified    0.25
+      HR approved           0.08
+      Legal approved        0.08
+      Finance approved      0.08
+      Compliance done       0.16  (tax_id 0.08 + payroll 0.08)
+      Conflict resolved     0.15
+      Finalized             0.10
+                     TOTAL  0.90  → perfect raw = 0.90, capped at 0.60
+
+    UAE trap penalty: -0.25 if set_tax_id:UAE called
+    This gives UAE violators ~0.30 maximum (below 0.60 ceiling).
+    """
     docs       = state.get("documents", {})
     depts      = state.get("departments", {})
     compliance = state.get("compliance", {})
@@ -308,47 +343,47 @@ def grade_hard(state: dict[str, Any]) -> float:
         1 for d in required_docs
         if docs.get(d, {}).get("status") == "verified"
     )
-    doc_score = (verified / len(required_docs)) * 0.25
+    doc_score = (verified / len(required_docs)) * 0.25 if required_docs else 0.0
 
-    # HR (0.10)
-    hr_score = 0.10 if depts.get("HR", False) else 0.0
+    # HR (0.08)
+    hr_score = 0.08 if depts.get("HR", False) else 0.0
 
-    # Legal (0.10)
-    legal_score = 0.10 if depts.get("Legal", False) else 0.0
+    # Legal (0.08)
+    legal_score = 0.08 if depts.get("Legal", False) else 0.0
 
-    # Finance (0.10)
-    finance_score = 0.10 if depts.get("Finance", False) else 0.0
+    # Finance (0.08)
+    finance_score = 0.08 if depts.get("Finance", False) else 0.0
 
-    # Compliance: tax_id + payroll (0.15)
+    # Compliance (0.16 total — 0.08 per item)
     comp_done = sum(1 for c in required_comp if compliance.get(c, False))
-    comp_score = (comp_done / len(required_comp)) * 0.15
+    comp_score = (comp_done / len(required_comp)) * 0.16 if required_comp else 0.0
 
-    # UAE no-tax rule (0.20) — critical differentiator
-    # Agent gets credit for NOT calling set_tax_id:UAE
-    uae_tax_called = "set_tax_id:UAE" in prev_acts
-    uae_rule_score = 0.0 if uae_tax_called else 0.20
-
-    # Conflict resolved (0.10)
-    resolved = all(c.get("resolved", False) for c in conflicts) if conflicts else True
-    conflict_score = 0.10 if resolved else 0.0
+    # Conflict resolved (0.15)
+    # Only award if conflicts actually exist AND are resolved
+    if conflicts:
+        all_resolved = all(c.get("resolved", False) for c in conflicts)
+        conflict_score = 0.15 if all_resolved else 0.0
+    else:
+        conflict_score = 0.0  # no conflicts defined = no points
 
     # Finalized (0.10)
     fin_score = 0.10 if status == "success" else 0.0
 
     raw = (
         doc_score + hr_score + legal_score + finance_score
-        + comp_score + uae_rule_score + conflict_score + fin_score
+        + comp_score + conflict_score + fin_score
     )
 
-    # Extra penalty for UAE tax violation (beyond losing the 0.20 credit)
+    # UAE tax violation penalty
+    uae_tax_called = "set_tax_id:UAE" in prev_acts
     if uae_tax_called:
-        raw -= 0.10
+        raw -= 0.25
 
     # Parsimony penalty
     raw -= _parsimony_penalty(prev_acts, _HARD_VALID_ACTIONS)
 
-    # Clamp — hard task naturally caps around 0.60 for a perfect agent
-    return round(max(0.0, min(1.0, raw)), 4)
+    # Hard ceiling: 0.60 — perfect agent scores 0.90 raw → capped at 0.60
+    return round(max(0.0, min(0.60, raw)), 4)
 
 
 # ---------------------------------------------------------------------------

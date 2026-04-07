@@ -8,15 +8,6 @@ Implements the full OpenEnv interface:
   - step(action)      → StepResult
   - state()           → WorkforceState
 
-FIX (v1.1):
-  _handle_finalize_case no longer sets status = "success" directly.
-  It now calls the grader, compares the score against the task's
-  expected score range, and sets status = "success" | "failed"
-  based on that comparison. The grader score drives the outcome.
-
-All state is held in-memory on the instance (self._state).
-No external database, no network calls, fully deterministic.
-
 Author: Team AI Kalesh
 """
 
@@ -29,26 +20,22 @@ from typing import Any
 from env.models import (
     Action,
     ComplianceStatus,
+    ConflictRecord,
     DepartmentStatus,
     DocumentRecord,
     EmployeeRecord,
     Observation,
-    Reward,
     StepResult,
     WorkforceState,
 )
 from env.reward import REWARDS, compute_reward
-from env.rules import (
-    COUNTRY_RULES,
-    DEPARTMENT_DEPENDENCIES,
-    REQUIRED_DOCUMENTS,
-)
+from env.rules import COUNTRY_RULES, DEPARTMENT_DEPENDENCIES
 from env.validators import (
     validate_compliance_action,
     validate_department_prerequisites,
     validate_document,
 )
-from env.tasks import TASK_INFO, TASKS
+from env.tasks import TASKS
 
 
 # ---------------------------------------------------------------------------
@@ -67,16 +54,36 @@ VALID_ACTION_TYPES: set[str] = {
     "set_tax_id",
     "set_shadow_payroll",
     "set_pdpa",
+    "resolve_conflict",     # FIX 4: added for hard task
     "finalize_case",
 }
 
+# FIX 3: All documents used across ALL three tasks
 VALID_DOCUMENTS: set[str] = {
     "passport",
     "visa",
     "employment_letter",
     "degree_certificate",
+    "work_permit",          # Germany
+    "employment_pass",      # Singapore
+    "residence_permit",     # UAE
+    "tax_form",
 }
+
 VALID_DEPARTMENTS: set[str] = {"HR", "Legal", "Finance"}
+
+# Actions that legitimately have no target (empty string is fine)
+NO_TARGET_ACTIONS: set[str] = {
+    "approve_hr",
+    "approve_legal",
+    "approve_finance",
+    "set_payroll",
+    "set_tax_id",
+    "set_shadow_payroll",
+    "set_pdpa",
+    "resolve_conflict",
+    "finalize_case",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -88,14 +95,8 @@ class WorkforceEnv:
     """
     Stateful OpenEnv environment simulating employee relocation workflows.
 
-    An AI agent interacts with this environment via:
-        reset(task_name)  → initial Observation
-        step(action)      → StepResult (observation, reward, done, info)
-        state()           → current WorkforceState
-
     Episode termination conditions:
-        finalize_case + score in range  → status="success", done=True
-        finalize_case + score out range → status="failed",  done=True
+        finalize_case with no blockers  → status="success", done=True
         deadline_days reaches 0         → status="failed",  done=True
         steps_taken reaches MAX_STEPS   → status="failed",  done=True
     """
@@ -123,9 +124,6 @@ class WorkforceEnv:
 
         Returns:
             Observation with the initial state and available actions.
-
-        Raises:
-            ValueError: If task_name is not recognised.
         """
         if task_name not in TASKS:
             raise ValueError(
@@ -141,6 +139,16 @@ class WorkforceEnv:
         self._last_action_error = None
         self._session_id = str(uuid.uuid4())
 
+        # Ensure conflicts key exists (empty list for easy/medium)
+        if "conflicts" not in self._state:
+            self._state["conflicts"] = []
+
+        # Ensure required lists exist
+        if "required_departments" not in self._state:
+            self._state["required_departments"] = []
+        if "required_compliance" not in self._state:
+            self._state["required_compliance"] = []
+
         return self._build_observation()
 
     def step(self, action: Action) -> StepResult:
@@ -154,6 +162,7 @@ class WorkforceEnv:
             StepResult with updated observation, per-step reward, done flag,
             and an info dict containing the grader score if done=True.
         """
+        # Guard: episode already finished
         if self._done:
             return StepResult(
                 observation=self._build_observation(),
@@ -162,44 +171,24 @@ class WorkforceEnv:
                 info={"error": "episode_already_done"},
             )
 
-        prev_progress = self._state["progress"]
+        prev_progress = self._state.get("progress", 0.0)
 
         # ── Validate action format ──────────────────────────────────────────
         format_error = self._validate_action_format(action)
         if format_error:
-            reward_val = REWARDS["invalid_action"]
-            self._last_action_result = "invalid_action"
-            self._last_action_error = format_error
-            self._steps_taken += 1
-            self._state["deadline_days"] = max(0, self._state["deadline_days"] - 1)
-            self._cumulative_reward = max(
-                0.0, min(1.0, self._cumulative_reward + reward_val)
-            )
-            self._check_terminal_conditions()
-            return StepResult(
-                observation=self._build_observation(),
-                reward=max(-1.0, min(1.0, reward_val)),
-                done=self._done,
-                info={"error": format_error},
+            return self._penalise(
+                result="invalid_action",
+                error=format_error,
+                reward_key="invalid_action",
             )
 
         # ── Check for repeated action ───────────────────────────────────────
-        action_key = f"{action.action_type}:{action.target}"
+        action_key = action.to_key()
         if action_key in self._state["previous_actions"]:
-            reward_val = REWARDS["repeated_action"]
-            self._last_action_result = "repeated_action"
-            self._last_action_error = f"Action '{action_key}' already performed."
-            self._steps_taken += 1
-            self._state["deadline_days"] = max(0, self._state["deadline_days"] - 1)
-            self._cumulative_reward = max(
-                0.0, min(1.0, self._cumulative_reward + reward_val)
-            )
-            self._check_terminal_conditions()
-            return StepResult(
-                observation=self._build_observation(),
-                reward=max(-1.0, min(1.0, reward_val)),
-                done=self._done,
-                info={"warning": "repeated_action"},
+            return self._penalise(
+                result="repeated_action",
+                error=f"Action '{action_key}' already performed.",
+                reward_key="repeated_action",
             )
 
         # ── Dispatch to action handler ──────────────────────────────────────
@@ -232,9 +221,8 @@ class WorkforceEnv:
         self._last_action_result = result
         self._last_action_error = error
 
-        # ── Check deadline/step-limit termination ───────────────────────────
-        # finalize_case sets self._done directly inside _handle_finalize_case.
-        # _check_terminal_conditions only handles deadline + step-limit paths.
+        # ── Check deadline / step-limit termination ─────────────────────────
+        # finalize_case sets self._done inside _handle_finalize_case.
         if not self._done:
             self._check_terminal_conditions()
 
@@ -245,11 +233,11 @@ class WorkforceEnv:
         if extra_info:
             info.update(extra_info)
 
-        # Attach grader score and final status whenever the episode ends
+        # Always attach grader score when episode ends
         if self._done and "final_score" not in info:
             from env.graders import grade
             info["final_score"] = grade(self._task_name, self._state)
-            info["status"]      = self._state["status"]
+            info["status"] = self._state["status"]
 
         return StepResult(
             observation=self._build_observation(),
@@ -260,7 +248,37 @@ class WorkforceEnv:
 
     def state(self) -> WorkforceState:
         """Return the current full environment state as a typed Pydantic model."""
-        return self._dict_to_model()
+        ws = self._dict_to_model()
+        # Attach episode metadata into previous_actions as a convention
+        # (WorkforceState has no step/reward fields — those live in environment)
+        return ws
+
+    # -----------------------------------------------------------------------
+    # Penalty helper (for invalid / repeated actions)
+    # -----------------------------------------------------------------------
+
+    def _penalise(
+        self, result: str, error: str, reward_key: str
+    ) -> StepResult:
+        """
+        Apply a penalty step without mutating case state.
+        Still ticks the clock and accumulates reward.
+        """
+        reward_val = REWARDS.get(reward_key, -0.2)
+        self._last_action_result = result
+        self._last_action_error = error
+        self._steps_taken += 1
+        self._state["deadline_days"] = max(0, self._state["deadline_days"] - 1)
+        self._cumulative_reward = max(
+            0.0, min(1.0, self._cumulative_reward + reward_val)
+        )
+        self._check_terminal_conditions()
+        return StepResult(
+            observation=self._build_observation(),
+            reward=max(-1.0, min(1.0, reward_val)),
+            done=self._done,
+            info={"result": result, "error": error},
+        )
 
     # -----------------------------------------------------------------------
     # Action dispatcher
@@ -276,13 +294,17 @@ class WorkforceEnv:
             "approve_hr":         self._handle_approve_department,
             "approve_legal":      self._handle_approve_department,
             "approve_finance":    self._handle_approve_department,
-            "set_payroll":        self._handle_set_payroll,
-            "set_tax_id":         self._handle_set_tax_id,
-            "set_shadow_payroll": self._handle_set_shadow_payroll,
-            "set_pdpa":           self._handle_set_pdpa,
+            "set_payroll":        self._handle_set_compliance,
+            "set_tax_id":         self._handle_set_compliance,
+            "set_shadow_payroll": self._handle_set_compliance,
+            "set_pdpa":           self._handle_set_compliance,
+            "resolve_conflict":   self._handle_resolve_conflict,   # FIX 4
             "finalize_case":      self._handle_finalize_case,
         }
-        return handlers[action.action_type](action)
+        handler = handlers.get(action.action_type)
+        if not handler:
+            return "invalid_action", f"No handler for '{action.action_type}'", {}
+        return handler(action)
 
     # -----------------------------------------------------------------------
     # Action handlers
@@ -292,47 +314,50 @@ class WorkforceEnv:
         self, action: Action
     ) -> tuple[str, str | None, dict]:
         doc_name = action.target
-        if doc_name not in VALID_DOCUMENTS:
-            return "invalid_action", f"Unknown document: {doc_name}", {}
-
         doc = self._state["documents"].get(doc_name)
         if not doc:
             return "invalid_action", f"Document '{doc_name}' not in this case", {}
-
         if doc["status"] != "missing":
             return "wrong_action", f"Document '{doc_name}' already {doc['status']}", {}
 
         self._state["documents"][doc_name]["status"] = "submitted"
-
-        if doc_name == "visa":
-            countries  = self._state["countries"]
-            needs_visa = any(
-                COUNTRY_RULES.get(c, {}).get("requires_visa", False)
-                for c in countries
-            )
-            self._state["documents"]["visa"]["is_valid"] = needs_visa
-
-        return "success", None, {"detail": f"Document '{doc_name}' submitted successfully"}
+        self._state["documents"][doc_name]["is_valid"] = True  # deterministic
+        return "success", None, {"detail": f"Document '{doc_name}' submitted"}
 
     def _handle_verify_document(
         self, action: Action
     ) -> tuple[str, str | None, dict]:
         doc_name = action.target
-        if doc_name not in VALID_DOCUMENTS:
-            return "invalid_action", f"Unknown document: {doc_name}", {}
-
         doc = self._state["documents"].get(doc_name)
         if not doc:
             return "invalid_action", f"Document '{doc_name}' not in this case", {}
+
+        # Must be submitted before it can be verified
+        status = doc.get("status", "missing")
+        if status == "missing":
+            return (
+                "prereq_violated",
+                f"Document '{doc_name}' has not been submitted yet. "
+                f"Call request_document first.",
+                {},
+            )
+        if status == "verified":
+            return "wrong_action", f"Document '{doc_name}' is already verified", {}
+        if status == "rejected":
+            return (
+                "wrong_action",
+                f"Document '{doc_name}' was rejected. Re-request before verifying.",
+                {},
+            )
 
         is_approved, reason = validate_document(self._state, doc_name)
 
         if is_approved:
             self._state["documents"][doc_name]["status"] = "verified"
-            return "success", None, {"detail": f"Document '{doc_name}' verified successfully"}
+            return "success", None, {"detail": f"Document '{doc_name}' verified"}
         else:
             self._state["documents"][doc_name]["status"] = "rejected"
-            return "wrong_action", f"Document '{doc_name}' rejected: {reason}", {"detail": reason}
+            return "wrong_action", f"Document '{doc_name}' rejected: {reason}", {}
 
     def _handle_approve_department(
         self, action: Action
@@ -342,9 +367,7 @@ class WorkforceEnv:
             "approve_legal":   "Legal",
             "approve_finance": "Finance",
         }
-        dept = dept_map.get(action.action_type)
-        if not dept:
-            return "invalid_action", f"Unknown department action: {action.action_type}", {}
+        dept = dept_map[action.action_type]
 
         if self._state["departments"][dept]:
             return "wrong_action", f"{dept} already approved", {}
@@ -354,106 +377,88 @@ class WorkforceEnv:
             return "prereq_violated", reason, {}
 
         self._state["departments"][dept] = True
-
         extra: dict[str, Any] = {"detail": f"{dept} approved"}
         if all(self._state["departments"].values()):
             extra["milestone"] = "all_departments_approved"
-
         return "success", None, extra
 
-    def _handle_set_payroll(
+    def _handle_set_compliance(
         self, action: Action
     ) -> tuple[str, str | None, dict]:
-        country = action.target
-        if country not in self._state["countries"]:
-            return "invalid_action", f"Country '{country}' is not part of this relocation case", {}
+        """
+        Unified handler for set_payroll, set_tax_id, set_shadow_payroll, set_pdpa.
+        FIX 6: accepts empty target — infers country from case if needed.
+        """
+        action_type = action.action_type
 
-        if self._state["compliance"]["payroll"]:
-            return "wrong_action", "Payroll already configured", {}
+        # Map action → compliance field
+        compliance_field_map = {
+            "set_payroll":        "payroll",
+            "set_tax_id":         "tax_id",
+            "set_shadow_payroll": "shadow_payroll",
+            "set_pdpa":           "pdpa",
+        }
+        field = compliance_field_map[action_type]
 
-        if not COUNTRY_RULES.get(country, {}).get("requires_payroll", False):
-            return "rule_violation", f"Payroll not required for {country}", {}
+        # Already set?
+        if self._state["compliance"][field]:
+            return "wrong_action", f"{field} already configured", {}
 
-        self._state["compliance"]["payroll"] = True
-        return "success", None, {"detail": f"Payroll configured for {country}"}
-
-    def _handle_set_tax_id(
-        self, action: Action
-    ) -> tuple[str, str | None, dict]:
-        country = action.target
-
-        ok, reason = validate_compliance_action(self._state, "set_tax_id", country)
+        # Validate using rules
+        # FIX 6: use first relevant country if target is empty
+        country = action.target or (
+            self._state["countries"][0] if self._state["countries"] else ""
+        )
+        ok, reason = validate_compliance_action(self._state, action_type, country)
         if not ok:
             return "rule_violation", reason, {}
 
-        if country not in self._state["countries"]:
-            return "invalid_action", f"Country '{country}' is not part of this relocation case", {}
+        self._state["compliance"][field] = True
+        return "success", None, {"detail": f"{field} configured for {country}"}
 
-        if self._state["compliance"]["tax_id"]:
-            return "wrong_action", "Tax ID already registered", {}
-
-        self._state["compliance"]["tax_id"] = True
-        return "success", None, {"detail": f"Tax ID registered for {country}"}
-
-    def _handle_set_shadow_payroll(
+    def _handle_resolve_conflict(
         self, action: Action
     ) -> tuple[str, str | None, dict]:
-        country = action.target
-        ok, reason = validate_compliance_action(self._state, "set_shadow_payroll", country)
-        if not ok:
-            return "rule_violation", reason, {}
+        """
+        FIX 4: Handle resolve_conflict for hard task.
+        Resolves the first unresolved conflict in the list.
+        """
+        conflicts = self._state.get("conflicts", [])
+        unresolved = [c for c in conflicts if not c.get("resolved", False)]
 
-        if country not in self._state["countries"]:
-            return "invalid_action", f"Country '{country}' is not part of this relocation case", {}
+        if not unresolved:
+            return "wrong_action", "No unresolved conflicts in this case", {}
 
-        if self._state["compliance"]["shadow_payroll"]:
-            return "wrong_action", "Shadow payroll already enabled", {}
+        # Resolve the first unresolved conflict
+        for c in self._state["conflicts"]:
+            if not c.get("resolved", False):
+                c["resolved"] = True
+                return "success", None, {
+                    "detail": f"Conflict resolved: {c['rule']}",
+                    "milestone": "conflict_resolved",
+                }
 
-        self._state["compliance"]["shadow_payroll"] = True
-        return "success", None, {"detail": "Shadow payroll enabled for Singapore"}
-
-    def _handle_set_pdpa(
-        self, action: Action
-    ) -> tuple[str, str | None, dict]:
-        country = action.target
-        ok, reason = validate_compliance_action(self._state, "set_pdpa", country)
-        if not ok:
-            return "rule_violation", reason, {}
-
-        if country not in self._state["countries"]:
-            return "invalid_action", f"Country '{country}' is not part of this relocation case", {}
-
-        if self._state["compliance"]["pdpa"]:
-            return "wrong_action", "PDPA consent already collected", {}
-
-        self._state["compliance"]["pdpa"] = True
-        return "success", None, {"detail": "PDPA consent collected for Singapore"}
-
-    # -----------------------------------------------------------------------
-    # _handle_finalize_case — FIXED METHOD (v1.1)
-    # -----------------------------------------------------------------------
+        return "wrong_action", "No conflicts to resolve", {}
 
     def _handle_finalize_case(
         self, action: Action
     ) -> tuple[str, str | None, dict]:
         """
-        Attempt to close the relocation case and evaluate final performance.
+        Attempt to close the relocation case.
 
-        Evaluation Flow:
-          1. Check for blockers (pure rule enforcement).
-          2. Compute final score using the deterministic grader.
-          3. Retrieve the expected score range from TASK_INFO.
-          4. Compare score vs range to determine success/failure.
-          5. Terminate the episode.
+        FIX 1: Accept both target="" and target="all".
+        FIX 7: Always set status="success" when blockers pass —
+                do NOT gate on expected_score_range (that's documentation only).
         """
-        if action.target != "all":
+        # FIX 1: accept empty target OR "all"
+        if action.target not in ("", "all"):
             return (
                 "invalid_action",
-                f"finalize_case target must be 'all', got '{action.target}'",
+                f"finalize_case target must be '' or 'all', got '{action.target}'",
                 {},
             )
 
-        # ── Step 1: Blocker check ───────────────────────────────────────────
+        # Blocker check
         blockers = self._get_blockers()
         if blockers:
             return (
@@ -462,70 +467,44 @@ class WorkforceEnv:
                 {"blockers": blockers},
             )
 
-        # ── Step 2: Run grader to get numeric score ─────────────────────────
+        # Run grader for the score
         from env.graders import grade
         final_score: float = grade(self._task_name, self._state)
 
-        # ── Step 3: Compare score against expected range from TASK_INFO ─────
-        task_meta = TASK_INFO.get(self._task_name, {})
-        min_score, max_score = task_meta.get("expected_score_range", (0.0, 1.0))
-        
-        score_in_range: bool = min_score <= final_score <= max_score
-
-        # ── Step 4: Set status based on score comparison ────────────────────
-        self._state["status"] = "success" if score_in_range else "failed"
-
-        # ── Step 5: End the episode ─────────────────────────────────────────
+        # FIX 7: success is determined by passing blockers, not score range
+        self._state["status"] = "success"
         self._done = True
 
-        # ── Build rich info payload ─────────────────────────────────────────
-        extra: dict[str, Any] = {
-            "final_score":    final_score,
-            "expected_range": [min_score, max_score],
-            "score_in_range": score_in_range,
-            "status":         self._state["status"],
-            "milestone":      "episode_complete",
+        return "success", None, {
+            "final_score": final_score,
+            "status":      "success",
+            "milestone":   "episode_complete",
+            "detail":      f"Case finalized. Score: {final_score:.4f}",
         }
-
-        if score_in_range:
-            extra["detail"] = (
-                f"Evaluation: Success. Score {final_score:.4f} is within range."
-            )
-            return "success", None, extra
-        else:
-            if final_score < min_score:
-                reason = f"Evaluation: Failed. Under-performance (Score {final_score:.4f} < {min_score})."
-            else:
-                reason = f"Evaluation: Failed. Over-optimized (Score {final_score:.4f} > {max_score})."
-            
-            extra["detail"] = reason
-            return "rule_violation", reason, extra
 
     # -----------------------------------------------------------------------
     # Validation helpers
     # -----------------------------------------------------------------------
 
     def _validate_action_format(self, action: Action) -> str | None:
-        """Return an error string if action is structurally invalid, else None."""
+        """Return error string if action is structurally invalid, else None."""
         if action.action_type not in VALID_ACTION_TYPES:
             return (
                 f"Unknown action_type '{action.action_type}'. "
-                f"Valid types: {sorted(VALID_ACTION_TYPES)}"
+                f"Valid: {sorted(VALID_ACTION_TYPES)}"
             )
-        if not action.target or not isinstance(action.target, str):
-            return "Target must be a non-empty string"
+
+        # FIX 2: document actions need a non-empty target from VALID_DOCUMENTS
         if action.action_type in {"request_document", "verify_document"}:
+            if not action.target:
+                return "Document actions require a non-empty target"
             if action.target not in VALID_DOCUMENTS:
                 return (
                     f"Unknown document '{action.target}'. "
-                    f"Valid documents: {sorted(VALID_DOCUMENTS)}"
+                    f"Valid: {sorted(VALID_DOCUMENTS)}"
                 )
-        if action.action_type in {"approve_hr", "approve_legal", "approve_finance"}:
-            if action.target not in VALID_DEPARTMENTS:
-                return (
-                    f"Unknown department '{action.target}'. "
-                    f"Valid departments: {sorted(VALID_DEPARTMENTS)}"
-                )
+
+        # FIX 2: all other actions allow empty target — no validation needed
         return None
 
     # -----------------------------------------------------------------------
@@ -533,38 +512,102 @@ class WorkforceEnv:
     # -----------------------------------------------------------------------
 
     def _compute_progress(self) -> float:
-        """Compute progress — delegates to rules.compute_checklist."""
-        from env.rules import compute_checklist
-        return compute_checklist(self._state)["progress"]
+        """Compute weighted progress fraction [0.0, 1.0]."""
+        docs  = self._state.get("documents", {})
+        depts = self._state.get("departments", {})
+        comp  = self._state.get("compliance", {})
+        conflicts = self._state.get("conflicts", [])
+        req_depts = self._state.get("required_departments", list(depts.keys()))
+        req_comp  = self._state.get("required_compliance", [])
+
+        # Document progress: verified=1.0, submitted=0.5, else=0.0
+        if docs:
+            doc_scores = []
+            for d in docs.values():
+                if d["status"] == "verified":
+                    doc_scores.append(1.0)
+                elif d["status"] == "submitted":
+                    doc_scores.append(0.5)
+                else:
+                    doc_scores.append(0.0)
+            doc_prog = sum(doc_scores) / len(doc_scores)
+        else:
+            doc_prog = 0.0
+
+        # Department progress
+        if req_depts:
+            dept_prog = sum(1 for d in req_depts if depts.get(d, False)) / len(req_depts)
+        else:
+            dept_prog = 1.0
+
+        # Compliance progress
+        if req_comp:
+            comp_prog = sum(1 for c in req_comp if comp.get(c, False)) / len(req_comp)
+        else:
+            comp_prog = 1.0
+
+        # Conflict resolution progress
+        if conflicts:
+            conflict_prog = sum(1 for c in conflicts if c.get("resolved", False)) / len(conflicts)
+        else:
+            conflict_prog = 1.0
+
+        total = (
+            0.40 * doc_prog
+            + 0.35 * dept_prog
+            + 0.15 * comp_prog
+            + 0.10 * conflict_prog
+        )
+        return round(min(max(total, 0.0), 1.0), 4)
 
     def _get_blockers(self) -> list[str]:
-        """Return all blockers — delegates to rules.get_blockers."""
-        from env.rules import get_blockers
-        return get_blockers(self._state)
+        """Return human-readable list of reasons finalize_case cannot proceed."""
+        blockers: list[str] = []
+        docs      = self._state.get("documents", {})
+        depts     = self._state.get("departments", {})
+        comp      = self._state.get("compliance", {})
+        conflicts = self._state.get("conflicts", [])
+        req_depts = self._state.get("required_departments", [])
+        req_comp  = self._state.get("required_compliance", [])
+
+        # All documents must be verified
+        unverified = [k for k, v in docs.items() if v["status"] != "verified"]
+        if unverified:
+            blockers.append(f"Unverified documents: {unverified}")
+
+        # Required departments must approve
+        missing_depts = [d for d in req_depts if not depts.get(d, False)]
+        if missing_depts:
+            blockers.append(f"Pending department approvals: {missing_depts}")
+
+        # Required compliance must be set
+        missing_comp = [c for c in req_comp if not comp.get(c, False)]
+        if missing_comp:
+            blockers.append(f"Incomplete compliance items: {missing_comp}")
+
+        # All conflicts must be resolved
+        unresolved = [c["rule"] for c in conflicts if not c.get("resolved", False)]
+        if unresolved:
+            blockers.append(f"Unresolved conflicts: {unresolved}")
+
+        return blockers
 
     # -----------------------------------------------------------------------
-    # Terminal condition check — deadline and step limit only
+    # Terminal condition check
     # -----------------------------------------------------------------------
 
     def _check_terminal_conditions(self) -> None:
-        """
-        Handle deadline and step-limit termination.
-        finalize_case termination is handled inside _handle_finalize_case.
-        """
+        """Handle deadline and step-limit termination only."""
         if self._done:
             return
-
-        if self._state["deadline_days"] <= 0:
+        if self._state.get("deadline_days", 1) <= 0:
             self._state["status"] = "failed"
             self._done = True
             self._last_action_error = "Episode failed: deadline reached"
-
         elif self._steps_taken >= MAX_STEPS:
             self._state["status"] = "failed"
             self._done = True
-            self._last_action_error = (
-                f"Episode failed: max steps ({MAX_STEPS}) reached"
-            )
+            self._last_action_error = f"Episode failed: max steps ({MAX_STEPS}) reached"
 
     # -----------------------------------------------------------------------
     # Observation builder
@@ -583,57 +626,75 @@ class WorkforceEnv:
         )
 
     def _get_available_actions(self) -> list[str]:
-        """Return action strings the agent can usefully take. Format: 'action_type:target'"""
+        """Return useful actions the agent can take. Format: 'action_type:target'"""
         available: list[str] = []
-        countries = self._state["countries"]
-        docs      = self._state["documents"]
-        depts     = self._state["departments"]
-        comp      = self._state["compliance"]
+        docs      = self._state.get("documents", {})
+        depts     = self._state.get("departments", {})
+        comp      = self._state.get("compliance", {})
+        countries = self._state.get("countries", [])
+        conflicts = self._state.get("conflicts", [])
 
+        # Document actions
         for doc_name, doc in docs.items():
             if doc["status"] == "missing":
                 available.append(f"request_document:{doc_name}")
             elif doc["status"] == "submitted":
                 available.append(f"verify_document:{doc_name}")
 
-        if not depts["HR"]:
-            available.append("approve_hr:HR")
-
-        if not depts["Legal"]:
+        # Department actions
+        if not depts.get("HR", False):
+            available.append("approve_hr")
+        if not depts.get("Legal", False):
             ok, _ = validate_department_prerequisites(self._state, "Legal")
             if ok:
-                available.append("approve_legal:Legal")
-
-        if not depts["Finance"]:
+                available.append("approve_legal")
+        if not depts.get("Finance", False):
             ok, _ = validate_department_prerequisites(self._state, "Finance")
             if ok:
-                available.append("approve_finance:Finance")
+                available.append("approve_finance")
 
+        # Compliance actions
         for country in countries:
             rules = COUNTRY_RULES.get(country, {})
-            if rules.get("requires_payroll") and not comp["payroll"]:
+            if rules.get("requires_payroll") and not comp.get("payroll"):
                 available.append(f"set_payroll:{country}")
-            if rules.get("requires_tax_id") and not comp["tax_id"]:
+            if rules.get("requires_tax_id") and not comp.get("tax_id"):
                 available.append(f"set_tax_id:{country}")
-            if rules.get("requires_pdpa") and not comp["pdpa"]:
+            if rules.get("requires_pdpa") and not comp.get("pdpa"):
                 available.append(f"set_pdpa:{country}")
-            if rules.get("requires_shadow_payroll") and not comp["shadow_payroll"]:
+            if rules.get("requires_shadow_payroll") and not comp.get("shadow_payroll"):
                 available.append(f"set_shadow_payroll:{country}")
 
+        # Conflict resolution
+        unresolved = [c for c in conflicts if not c.get("resolved", False)]
+        if unresolved:
+            available.append("resolve_conflict")
+
+        # Finalize
         if not self._get_blockers():
-            available.append("finalize_case:all")
+            available.append("finalize_case")
 
         return available
 
     # -----------------------------------------------------------------------
-    # State conversion
+    # State conversion: dict → WorkforceState Pydantic model
     # -----------------------------------------------------------------------
 
     def _dict_to_model(self) -> WorkforceState:
         """Convert internal state dict to a typed WorkforceState Pydantic model."""
         s = self._state
+        if not s:
+            # Return minimal state if reset() hasn't been called yet
+            return WorkforceState(
+                case_id="none",
+                task_name="easy",
+                employee=EmployeeRecord(role="Engineer", has_dependents=False),
+                countries=["Germany"],
+            )
+
         return WorkforceState(
             case_id=s["case_id"],
+            task_name=s.get("task_name", self._task_name),   # FIX 5
             employee=EmployeeRecord(
                 role=s["employee"]["role"],
                 has_dependents=s["employee"]["has_dependents"],
@@ -657,8 +718,18 @@ class WorkforceEnv:
                 pdpa=s["compliance"]["pdpa"],
                 shadow_payroll=s["compliance"]["shadow_payroll"],
             ),
+            conflicts=[                                        # FIX 5
+                ConflictRecord(
+                    countries=c["countries"],
+                    rule=c["rule"],
+                    resolved=c.get("resolved", False),
+                )
+                for c in s.get("conflicts", [])
+            ],
             deadline_days=s["deadline_days"],
             previous_actions=s["previous_actions"],
-            progress=s["progress"],
+            progress=s.get("progress", 0.0),
             status=s["status"],
+            required_departments=s.get("required_departments", []),  # FIX 5
+            required_compliance=s.get("required_compliance", []),     # FIX 5
         )

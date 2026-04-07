@@ -11,15 +11,20 @@ This module exposes the canonical import path used by environment.py:
 Author: Team AI Kalesh
 """
 
-# Add graders/ to path so the import resolves correctly regardless of CWD
-
 from graders.graders import (
-    explain,
     grade,
-    grade_all,
-    print_score_table,
-    GradeReport,
     grade_easy,
     grade_medium,
     grade_hard,
+    grade_all,
+    explain,
 )
+
+__all__ = [
+    "grade",
+    "grade_easy",
+    "grade_medium",
+    "grade_hard",
+    "grade_all",
+    "explain",
+]

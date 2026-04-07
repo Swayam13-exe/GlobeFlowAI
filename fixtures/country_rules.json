@@ -2,11 +2,7 @@
     "Germany": {
         "requires_visa": true,
         "correct_visa": "EU Blue Card",
-        "visa_options": [
-            "EU Blue Card",
-            "Work Permit",
-            "Job Seeker Visa"
-        ],
+        "visa_options": ["EU Blue Card", "Work Permit", "Job Seeker Visa"],
         "requires_tax_id": true,
         "tax_authority": "Bundeszentralamt für Steuern",
         "requires_payroll": true,
@@ -21,27 +17,17 @@
             "passport",
             "visa",
             "employment_letter",
-            "degree_certificate"
+            "work_permit"
         ],
-        "compliance_items": [
-            "tax_id",
-            "payroll"
-        ],
-        "departments_required": [
-            "HR",
-            "Legal"
-        ],
-        "notes": "EU Blue Card preferred for skilled workers earning above threshold. GDPR applies to all data processing."
+        "compliance_items": ["tax_id", "payroll"],
+        "departments_required": ["HR", "Legal"],
+        "notes": "EU Blue Card preferred for skilled workers. GDPR applies."
     },
     "Singapore": {
         "requires_visa": true,
         "correct_visa": "Employment Pass",
-        "visa_options": [
-            "Employment Pass",
-            "S Pass",
-            "Work Permit"
-        ],
-        "requires_tax_id": true,
+        "visa_options": ["Employment Pass", "S Pass", "Work Permit"],
+        "requires_tax_id": false,
         "tax_authority": "Inland Revenue Authority of Singapore",
         "requires_payroll": true,
         "requires_local_contract": true,
@@ -56,26 +42,14 @@
             "visa",
             "employment_letter"
         ],
-        "compliance_items": [
-            "tax_id",
-            "payroll",
-            "pdpa",
-            "shadow_payroll"
-        ],
-        "departments_required": [
-            "HR",
-            "Legal",
-            "Finance"
-        ],
-        "notes": "Employment Pass required for professionals. Shadow payroll mandatory. PDPA consent before any data processing."
+        "compliance_items": ["payroll", "pdpa", "shadow_payroll"],
+        "departments_required": ["HR", "Legal"],
+        "notes": "Employment Pass required. Shadow payroll mandatory. PDPA consent required."
     },
     "UAE": {
         "requires_visa": true,
         "correct_visa": "Employment Visa",
-        "visa_options": [
-            "Employment Visa",
-            "Freelance Permit"
-        ],
+        "visa_options": ["Employment Visa", "Freelance Permit"],
         "requires_tax_id": false,
         "tax_authority": null,
         "requires_payroll": true,
@@ -91,14 +65,8 @@
             "visa",
             "employment_letter"
         ],
-        "compliance_items": [
-            "payroll"
-        ],
-        "departments_required": [
-            "HR",
-            "Legal",
-            "Finance"
-        ],
-        "notes": "UAE has NO income tax. set_tax_id for UAE is a rule violation (-0.3). Payroll must still be configured."
+        "compliance_items": ["payroll"],
+        "departments_required": ["HR", "Legal", "Finance"],
+        "notes": "UAE has NO income tax. set_tax_id for UAE is a rule violation. Payroll still required."
     }
 }

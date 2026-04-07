@@ -3,24 +3,15 @@ inference.py
 ============
 OpenAI-powered inference runner for openenv-workforce.
 
-Runs an LLM agent through all three tasks (easy, medium, hard) by:
-  1. Resetting the environment for the task
-  2. Building a prompt with the current observation
-  3. Calling the OpenAI API to get the next action
-  4. Parsing and applying the action via env.step()
-  5. Repeating until done=True or max_steps exceeded
-  6. Grading the final state and printing a score table
+MANDATORY STDOUT FORMAT — DO NOT MODIFY:
+  [START] task=<task_name> env=<benchmark> model=<model_name>
+  [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+  [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...,rn>
 
-Configuration (read from environment variables — NO hardcoding):
-  API_BASE_URL:  OpenAI-compatible API base URL
-                 Default: https://api.openai.com/v1
-  MODEL_NAME:    Model to use  (e.g. gpt-4o, gpt-4-turbo)
-                 Default: gpt-4o
-  HF_TOKEN:      HuggingFace API token (used when running on HF Spaces)
-                 Passed as Bearer token if set.
-  OPENAI_API_KEY: Standard OpenAI key (used when HF_TOKEN not set)
-
-Max steps per task: 20 (below the env ceiling of 25)
+MANDATORY ENV VARS:
+  API_BASE_URL  — OpenAI-compatible API endpoint
+  MODEL_NAME    — Model identifier
+  HF_TOKEN      — API key (used as Bearer token)
 
 Author: Team AI Kalesh
 """
@@ -30,144 +21,163 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
+import textwrap
 import time
-from typing import Any
+from typing import List, Optional
 
-import openai
-
-# ---------------------------------------------------------------------------
-# Environment variable configuration — NO hardcoding
-# ---------------------------------------------------------------------------
-
-API_BASE_URL: str = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME:   str = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-HF_TOKEN:     str | None = os.environ.get("HF_TOKEN")
-OPENAI_KEY:   str | None = os.environ.get("OPENAI_API_KEY")
-
-# HF_TOKEN takes precedence over OPENAI_API_KEY
-_api_key = HF_TOKEN or OPENAI_KEY or "MISSING_API_KEY"
-
-MAX_STEPS_PER_TASK: int = 20   # hard ceiling for inference runner
+from openai import OpenAI
 
 # ---------------------------------------------------------------------------
-# OpenAI client — configured once at module load
+# Configuration — read from environment variables, NO hardcoding
 # ---------------------------------------------------------------------------
 
-client = openai.OpenAI(
-    api_key=_api_key,
-    base_url=API_BASE_URL,
-)
+API_BASE_URL: str        = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
+API_KEY:      str | None = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
+MODEL_NAME:   str        = os.getenv("MODEL_NAME", "gpt-4o-mini")
+
+BENCHMARK        = "openenv-workforce"
+MAX_STEPS        = 20          # per task, below env ceiling of 25
+TEMPERATURE      = 0.0         # deterministic
+MAX_TOKENS       = 100
+SUCCESS_THRESHOLD = 0.5        # score >= this → success=true in [END]
 
 # ---------------------------------------------------------------------------
-# System prompt — describes the action space to the LLM agent
+# Mandatory logging functions — exact format, do NOT change
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are an expert workforce mobility compliance agent.
-Your goal is to resolve an employee relocation case by taking the correct sequence of actions.
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
-Available action types and their targets:
-  request_document   → passport | visa | employment_letter | degree_certificate
-  verify_document    → passport | visa | employment_letter | degree_certificate
-  approve_hr         → HR
-  approve_legal      → Legal
-  approve_finance    → Finance
-  set_payroll        → Germany | Singapore | UAE
-  set_tax_id         → Germany | Singapore  (⚠️ NEVER use UAE — UAE has NO income tax!)
-  set_shadow_payroll → Singapore
-  set_pdpa           → Singapore
-  finalize_case      → all
 
-CRITICAL RULES:
-1. UAE has NO income tax. NEVER call set_tax_id with target=UAE.
-2. Legal can only be approved AFTER all required documents are verified.
-3. Finance can only be approved AFTER Legal is approved.
-4. Singapore requires PDPA consent AND shadow payroll before finalize.
-5. Only call actions that are shown in available_actions.
+def log_step(
+    step: int,
+    action: str,
+    reward: float,
+    done: bool,
+    error: Optional[str],
+) -> None:
+    error_val = error if error else "null"
+    done_val  = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} "
+        f"reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
 
-Always respond with ONLY a JSON object on a single line:
+
+def log_end(
+    success: bool,
+    steps: int,
+    score: float,
+    rewards: List[float],
+) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# System prompt for the LLM agent
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = textwrap.dedent("""
+You are an expert workforce mobility compliance agent.
+Your goal is to resolve an employee relocation case by taking the correct actions.
+
+At each step you receive the current case state.
+Respond with ONLY a JSON object on a single line — no explanation, no markdown:
 {"action_type": "<type>", "target": "<target>"}
 
-No explanation. No markdown. Just the JSON."""
+Valid action_types and targets:
+  request_document   → target = document name (passport/visa/employment_letter/work_permit)
+  verify_document    → target = document name (must request first)
+  approve_hr         → target = "" (no prerequisites)
+  approve_legal      → target = "" (ALL documents must be verified first)
+  approve_finance    → target = "" (Legal must approve first, conflicts resolved)
+  set_payroll        → target = "" or country name
+  set_tax_id         → target = "" or country name
+  set_shadow_payroll → target = "" (Singapore only)
+  set_pdpa           → target = "" (Singapore only)
+  resolve_conflict   → target = "" (hard task only)
+  finalize_case      → target = "" (only when all requirements met)
+
+CRITICAL RULES:
+1. ALWAYS request_document before verify_document
+2. Legal approves ONLY after ALL documents are verified
+3. Finance approves ONLY after Legal approves
+4. UAE has NO income tax — NEVER call set_tax_id for UAE
+5. Hard task: call resolve_conflict BEFORE approve_finance
+6. Only call finalize_case when available_actions shows it
+""").strip()
 
 
 # ---------------------------------------------------------------------------
 # Prompt builder
 # ---------------------------------------------------------------------------
 
-def build_prompt(observation: dict[str, Any]) -> str:
-    """
-    Build a concise user-facing prompt from the current observation.
+def build_prompt(obs: dict, step: int, history: List[str]) -> str:
+    state     = obs.get("state", {})
+    available = obs.get("available_actions", [])
+    blockers  = obs.get("current_blockers", [])
+    last_res  = obs.get("last_action_result", "")
+    last_err  = obs.get("last_action_error", "")
 
-    Args:
-        observation: Observation dict from env reset/step.
-
-    Returns:
-        Prompt string for the LLM.
-    """
-    state      = observation.get("state", {})
-    available  = observation.get("available_actions", [])
-    blockers   = observation.get("current_blockers", [])
-    last_res   = observation.get("last_action_result", "")
-    last_err   = observation.get("last_action_error", "")
-    steps      = observation.get("steps_taken", 0)
-
-    progress   = state.get("progress", 0.0)
-    deadline   = state.get("deadline_days", 0)
-    countries  = state.get("countries", [])
-    status     = state.get("status", "in_progress")
-
-    # Document statuses
-    docs_summary = []
-    for doc_name, doc in state.get("documents", {}).items():
-        docs_summary.append(f"  {doc_name}: {doc.get('status', 'unknown')}")
-
-    # Department statuses
+    docs  = state.get("documents", {})
     depts = state.get("departments", {})
-    dept_summary = []
-    for dept, approved in depts.items():
-        dept_summary.append(f"  {dept}: {'✓ approved' if approved else '✗ pending'}")
+    comp  = state.get("compliance", {})
 
-    # Compliance statuses
-    comp = state.get("compliance", {})
-    comp_summary = []
-    for item, done in comp.items():
-        comp_summary.append(f"  {item}: {'✓' if done else '✗'}")
+    doc_lines  = [f"  {k}: {v.get('status','?')}" for k, v in docs.items()]
+    dept_lines = [f"  {k}: {'✓' if v else '✗'}" for k, v in depts.items()]
+    comp_lines = [f"  {k}: {'✓' if v else '✗'}" for k, v in comp.items()]
+
+    history_block = "\n".join(history[-4:]) if history else "None"
 
     lines = [
-        f"=== RELOCATION CASE ===",
-        f"Countries: {', '.join(countries)}",
-        f"Progress: {progress*100:.1f}%  |  Steps taken: {steps}  |  Deadline: {deadline} days",
-        f"Status: {status}",
+        f"Step: {step}",
+        f"Countries: {state.get('countries', [])}",
+        f"Progress: {state.get('progress', 0.0)*100:.1f}%  Deadline: {state.get('deadline_days', 0)} days",
         "",
         "Documents:",
-        *docs_summary,
+        *doc_lines,
         "",
         "Departments:",
-        *dept_summary,
+        *dept_lines,
         "",
         "Compliance:",
-        *comp_summary,
+        *comp_lines,
         "",
-        f"Last action result: {last_res or 'n/a'}",
+        f"Last result: {last_res or 'n/a'}",
     ]
 
     if last_err:
         lines.append(f"Last error: {last_err}")
 
+    conflicts = state.get("conflicts", [])
+    if conflicts:
+        lines.append("")
+        for c in conflicts:
+            resolved = c.get("resolved", False) if isinstance(c, dict) else False
+            rule = c.get("rule", "") if isinstance(c, dict) else str(c)
+            lines.append(f"Conflict: {rule} [{'RESOLVED' if resolved else 'UNRESOLVED'}]")
+
     if blockers:
         lines.append("")
-        lines.append("Blockers remaining:")
-        for b in blockers[:5]:   # show max 5 to keep prompt short
+        lines.append("Blockers:")
+        for b in blockers[:4]:
             lines.append(f"  - {b}")
 
     lines.append("")
-    lines.append("Available actions (choose one):")
-    for avail in available[:15]:  # cap at 15
-        lines.append(f"  {avail}")
+    lines.append("Available actions:")
+    for a in available[:12]:
+        lines.append(f"  {a}")
 
     lines.append("")
-    lines.append("Respond with the single best action JSON:")
+    lines.append(f"Recent history:\n{history_block}")
+    lines.append("")
+    lines.append("Respond with JSON only:")
 
     return "\n".join(lines)
 
@@ -176,201 +186,270 @@ def build_prompt(observation: dict[str, Any]) -> str:
 # Action parser
 # ---------------------------------------------------------------------------
 
-def parse_action(response_text: str) -> dict[str, str] | None:
-    """
-    Extract JSON action from LLM response.
+def parse_action(text: str) -> dict:
+    """Extract JSON action from LLM response. Returns safe fallback on failure."""
+    text = text.strip()
 
-    Handles:
-      - Clean JSON: {"action_type": "...", "target": "..."}
-      - JSON inside markdown code fences
-      - Trailing text after JSON
+    # Strip markdown fences
+    if "```" in text:
+        parts = text.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            try:
+                data = json.loads(part)
+                if "action_type" in data:
+                    return data
+            except Exception:
+                pass
 
-    Args:
-        response_text: Raw string from the LLM.
-
-    Returns:
-        Dict with "action_type" and "target", or None if parsing fails.
-    """
-    # Try direct parse first
-    text = response_text.strip()
+    # Direct parse
     try:
         data = json.loads(text)
-        if "action_type" in data and "target" in data:
+        if "action_type" in data:
             return data
-    except json.JSONDecodeError:
+    except Exception:
         pass
 
-    # Try extracting first JSON object
-    match = re.search(r'\{[^}]+\}', text)
+    # Extract first JSON object
+    match = re.search(r'\{[^}]+\}', text, re.DOTALL)
     if match:
         try:
             data = json.loads(match.group())
-            if "action_type" in data and "target" in data:
+            if "action_type" in data:
                 return data
-        except json.JSONDecodeError:
+        except Exception:
             pass
 
-    return None
+    # Safe fallback
+    return {"action_type": "request_document", "target": "passport"}
 
 
 # ---------------------------------------------------------------------------
-# Single task runner
+# LLM call
 # ---------------------------------------------------------------------------
 
-def run_task(task_name: str) -> tuple[float, dict[str, Any]]:
+def get_model_action(
+    client: OpenAI,
+    obs: dict,
+    step: int,
+    history: List[str],
+) -> dict:
+    """Call the LLM and return parsed action dict."""
+    prompt = build_prompt(obs, step, history)
+    try:
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+            stream=False,
+        )
+        text = (completion.choices[0].message.content or "").strip()
+        return parse_action(text)
+    except Exception as exc:
+        print(f"[DEBUG] Model call failed: {exc}", flush=True)
+        return {"action_type": "request_document", "target": "passport"}
+
+
+# ---------------------------------------------------------------------------
+# Episode runner — one task
+# ---------------------------------------------------------------------------
+
+def run_episode(task_name: str, client: OpenAI) -> dict:
     """
-    Run one complete episode for the given task using the LLM agent.
-    Emits structured [START], [STEP], and [END] logs to stdout.
+    Run one complete episode for the given task.
+    Emits [START], [STEP]×n, [END] to stdout.
 
-    Args:
-        task_name: "easy" | "medium" | "hard"
-
-    Returns:
-        (final_score: float, final_status: str)
+    Returns summary dict for final table.
     """
     from env.environment import WorkforceEnv
     from graders.graders import grade
 
+    rewards:      List[float] = []
+    history:      List[str]   = []
+    steps_taken:  int         = 0
+    score:        float       = 0.0
+    success:      bool        = False
+    final_status: str         = "failed"
+
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+
     env = WorkforceEnv()
-    observation = env.reset(task_name=task_name)
 
-    obs_dict = observation.model_dump()
+    try:
+        obs = env.reset(task_name=task_name).model_dump()
 
-    # Emit [START] log
-    print(json.dumps({
-        "event": "START",
-        "task": task_name,
-        "countries": observation.state.countries,
-        "model": MODEL_NAME,
-        "api_base_url": API_BASE_URL,
-        "max_steps": MAX_STEPS_PER_TASK,
-    }))
+        for step in range(1, MAX_STEPS + 1):
+            # Check if already done from previous step
+            if obs.get("done", False):
+                break
 
-    done     = False
-    steps    = 0
-    _captured_score:  float | None = None
-    _captured_status: str   = "unknown"
+            # Get action from model
+            action_dict = get_model_action(client, obs, step, history)
+            action_type = action_dict.get("action_type", "request_document")
+            target      = action_dict.get("target", "")
 
-    while not done and steps < MAX_STEPS_PER_TASK:
-        prompt = build_prompt(obs_dict)
+            # Format action string for [STEP] log
+            action_str = f"{action_type}:{target}" if target else action_type
 
-        # ── LLM call ────────────────────────────────────────────────────────
-        try:
-            response = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": prompt},
-                ],
-                temperature=0.0,    # deterministic
-                max_tokens=64,      # action JSON is tiny
+            # Apply action
+            try:
+                from env.models import Action
+                action = Action(action_type=action_type, target=target)
+                result = env.step(action)
+
+                reward = float(result.reward or 0.0)
+                done   = bool(result.done)
+                error  = result.info.get("error") if result.info else None
+
+                # Update obs for next iteration
+                obs = result.observation.model_dump()
+
+                # Capture score if episode ended via finalize
+                if done and "final_score" in result.info:
+                    score        = float(result.info["final_score"])
+                    final_status = result.info.get("status", "failed")
+
+            except Exception as exc:
+                reward = 0.0
+                done   = False
+                error  = str(exc)[:80]
+
+            rewards.append(reward)
+            steps_taken = step
+
+            log_step(
+                step=step,
+                action=action_str,
+                reward=reward,
+                done=done,
+                error=error,
             )
-            raw_text = response.choices[0].message.content or ""
-        except openai.OpenAIError as exc:
-            print(json.dumps({
-                "event": "STEP",
-                "task": task_name,
-                "step": steps + 1,
-                "error": str(exc),
-            }))
-            break
 
-        # ── Parse action ────────────────────────────────────────────────────
-        action_dict = parse_action(raw_text)
-        if not action_dict:
-            print(json.dumps({
-                "event": "STEP",
-                "task": task_name,
-                "step": steps + 1,
-                "error": f"Failed to parse action from: {raw_text!r}",
-            }))
-            break
+            history.append(
+                f"Step {step}: {action_str} → reward={reward:+.2f}"
+            )
 
-        from env.models import Action
-        try:
-            action = Action(**action_dict)
-        except Exception as exc:
-            print(json.dumps({
-                "event": "STEP",
-                "task": task_name,
-                "step": steps + 1,
-                "error": f"Invalid action structure: {exc}",
-            }))
-            break
+            # Small delay to respect rate limits
+            time.sleep(0.3)
 
-        # ── Step ─────────────────────────────────────────────────────────────
-        step_result = env.step(action)
-        result_code = step_result.info.get("result", "?")
-        reward      = step_result.reward
-        done        = step_result.done
+            if done:
+                break
 
-        # Emit [STEP] log
-        print(json.dumps({
-            "event": "STEP",
-            "task": task_name,
-            "step": steps + 1,
-            "action_type": action.action_type,
-            "target": action.target,
-            "result": result_code,
-            "reward": round(reward, 4),
-            "done": done,
-            "progress": round(obs_dict.get("state", {}).get("progress", 0.0), 4),
-        }))
+        # If episode ended without finalize, grade the partial state
+        if score == 0.0 or final_status == "failed":
+            try:
+                state_dict = env.state().model_dump()
+                # Build grader-compatible dict
+                score = grade(
+                    task_name,
+                    _flatten_state(state_dict),
+                )
+                final_status = state_dict.get("status", "failed")
+            except Exception as exc:
+                print(f"[DEBUG] Grading error: {exc}", flush=True)
+                score = 0.0
 
-        obs_dict = step_result.observation.model_dump()
-        steps   += 1
+        score   = min(max(score, 0.0), 1.0)
+        success = score >= SUCCESS_THRESHOLD
 
-        # Capture score/status emitted by finalize_case for final reporting
-        if step_result.done and "final_score" in step_result.info:
-            _captured_score  = step_result.info["final_score"]
-            _captured_status = step_result.info.get("status", "unknown")
+    except Exception as exc:
+        print(f"[DEBUG] Episode error: {exc}", flush=True)
 
-        # Small delay to respect API rate limits
-        time.sleep(0.1)
+    finally:
+        # [END] must always be emitted, even on exception
+        log_end(
+            success=success,
+            steps=steps_taken,
+            score=score,
+            rewards=rewards,
+        )
 
-    # ── Final grade ──────────────────────────────────────────────────────────
-    if _captured_score is not None:
-        final_score = _captured_score
-        final_status = _captured_status
-    else:
-        # Fallback: re-grade if finalize was never reached (max steps exceeded)
-        final_state = env.state().model_dump()
-        final_score = grade(task_name, final_state)
-        final_status = final_state.get("status", "unknown")
-
-    # Emit [END] log
-    print(json.dumps({
-        "event": "END",
-        "task": task_name,
-        "final_score": round(final_score, 4),
-        "final_status": final_status,
-        "steps_taken": steps,
-    }))
-
-    return final_score, final_status
+    return {
+        "task":        task_name,
+        "score":       score,
+        "steps":       steps_taken,
+        "status":      final_status,
+        "cumulative":  round(sum(rewards), 4),
+    }
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# State flattener for grader compatibility
+# ---------------------------------------------------------------------------
+
+def _flatten_state(state_dict: dict) -> dict:
+    """
+    Convert WorkforceState.model_dump() output to the flat dict format
+    that graders expect.
+    """
+    d = dict(state_dict)
+
+    # Flatten documents
+    docs = {}
+    for name, doc in d.get("documents", {}).items():
+        docs[name] = doc if isinstance(doc, dict) else {
+            "status": doc.status, "is_valid": doc.is_valid
+        }
+    d["documents"] = docs
+
+    # Flatten departments
+    depts = d.get("departments", {})
+    if not isinstance(depts, dict):
+        depts = {"HR": depts.HR, "Legal": depts.Legal, "Finance": depts.Finance}
+    d["departments"] = depts
+
+    # Flatten compliance
+    comp = d.get("compliance", {})
+    if not isinstance(comp, dict):
+        comp = {
+            "tax_id": comp.tax_id, "payroll": comp.payroll,
+            "pdpa": comp.pdpa, "shadow_payroll": comp.shadow_payroll,
+        }
+    d["compliance"] = comp
+
+    # Flatten conflicts
+    conflicts = d.get("conflicts", [])
+    d["conflicts"] = [
+        c if isinstance(c, dict) else {
+            "countries": c.countries, "rule": c.rule, "resolved": c.resolved
+        }
+        for c in conflicts
+    ]
+
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Run all three tasks and print a final score table."""
-    from graders.graders import grade_all, print_score_table
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    print(f"\nModel:    {MODEL_NAME}")
-    print(f"API URL:  {API_BASE_URL}")
-    print(f"Max steps per task: {MAX_STEPS_PER_TASK}")
-
-    final_statuses: dict[str, str]            = {}
-    scores:         dict[str, float]           = {}
-
+    results = []
     for task_name in ["easy", "medium", "hard"]:
-        score, status = run_task(task_name)
-        scores[task_name]       = score
-        final_statuses[task_name] = status
+        print(f"\n{'='*55}", flush=True)
+        result = run_episode(task_name, client)
+        results.append(result)
 
-    print_score_table(scores)
+    # Final summary (plain text — won't interfere with [START]/[STEP]/[END] parsing)
+    print(f"\n{'='*55}", flush=True)
+    print("BASELINE RESULTS", flush=True)
+    print(f"{'='*55}", flush=True)
+    for r in results:
+        print(
+            f"{r['task'].upper():8} | score={r['score']:.3f} "
+            f"| steps={r['steps']:2d} | {r['status']}",
+            flush=True,
+        )
+    avg = sum(r["score"] for r in results) / len(results)
+    print(f"\nAverage Score: {avg:.3f}", flush=True)
 
 
 if __name__ == "__main__":

@@ -2,24 +2,6 @@
 main.py
 =======
 FastAPI application for openenv-workforce.
-
-Endpoints:
-  GET  /              → health check (HuggingFace Space ping)
-  GET  /health        → health check (explicit)
-  GET  /tasks         → list available tasks
-  POST /reset         → start a new episode
-  POST /step          → apply one action
-  GET  /state         → read current state
-  POST /grade         → grade current state
-
-Session management:
-  Each POST /reset creates a new session (UUID).
-  Sessions held in-memory — restarting clears all sessions.
-
-Request format for /step is FLAT (aligns with inference.py):
-  {"action_type": "...", "target": "...", "session_id": "..."}
-
-Author: Team AI Kalesh
 """
 
 from __future__ import annotations
@@ -37,7 +19,7 @@ from env.environment import WorkforceEnv
 from env.models import Action
 
 # ---------------------------------------------------------------------------
-# Request models — flat format matching inference.py
+# Request models
 # ---------------------------------------------------------------------------
 
 class ResetRequest(BaseModel):
@@ -48,7 +30,7 @@ class ResetRequest(BaseModel):
 class StepRequest(BaseModel):
     action_type: str           = "request_document"
     target:      str           = ""
-    session_id:  Optional[str] = None   # optional — falls back to last active session
+    session_id:  Optional[str] = None
 
 
 class GradeRequest(BaseModel):
@@ -61,12 +43,11 @@ class GradeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 _sessions:      dict[str, WorkforceEnv] = {}
-_last_session:  str | None              = None   # fallback when session_id not sent
+_last_session:  str | None              = None
 MAX_SESSIONS    = 50
 
 
 def _get_session(session_id: str | None) -> WorkforceEnv:
-    """Get session by ID or fall back to last active session."""
     sid = session_id or _last_session
     if not sid or sid not in _sessions:
         raise HTTPException(
@@ -111,20 +92,12 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Startup — pre-load so HF Space ping returns 200 immediately
-# ---------------------------------------------------------------------------
-
-
-
-
-# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 @app.get("/")
 @app.get("/health")
 async def health() -> dict[str, str]:
-    """Health check — required by HuggingFace Space automated ping."""
     return {
         "status":      "ok",
         "environment": "openenv-workforce",
@@ -145,14 +118,17 @@ async def list_tasks() -> dict[str, Any]:
 
 
 @app.post("/reset")
-async def reset(request: ResetRequest) -> dict[str, Any]:
+async def reset(request: Optional[ResetRequest] = None) -> dict[str, Any]:
     """
     Start a new episode.
-
-    Body: {"task_name": "easy" | "medium" | "hard", "session_id": "<optional>"}
-    Returns: {"session_id": str, "observation": dict}
+    Body is fully optional — defaults to task_name="easy".
+    POST /reset with no body is valid (used by OpenEnv health checks).
     """
     global _last_session
+
+    # Use defaults if no body was sent
+    if request is None:
+        request = ResetRequest()
 
     if request.task_name not in ("easy", "medium", "hard"):
         raise HTTPException(
@@ -160,7 +136,6 @@ async def reset(request: ResetRequest) -> dict[str, Any]:
             detail=f"Unknown task '{request.task_name}'. Valid: easy, medium, hard",
         )
 
-    # Evict oldest session if at capacity
     if len(_sessions) >= MAX_SESSIONS:
         oldest = next(iter(_sessions))
         _sessions.pop(oldest)
@@ -183,12 +158,6 @@ async def reset(request: ResetRequest) -> dict[str, Any]:
 
 @app.post("/step")
 async def step(request: StepRequest) -> dict[str, Any]:
-    """
-    Apply one action.
-
-    Body: {"action_type": "...", "target": "...", "session_id": "<optional>"}
-    Returns: {"observation": dict, "reward": float, "done": bool, "info": dict}
-    """
     env = _get_session(request.session_id)
 
     try:
@@ -204,7 +173,6 @@ async def step(request: StepRequest) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    # Clean up finished sessions
     if result.done:
         sid = request.session_id or _last_session
         _sessions.pop(sid, None)
@@ -219,11 +187,6 @@ async def step(request: StepRequest) -> dict[str, Any]:
 
 @app.get("/state")
 async def state(session_id: Optional[str] = None) -> dict[str, Any]:
-    """
-    Get current episode state without mutating it.
-
-    Query param: ?session_id=<id>  (optional — uses last active session)
-    """
     env = _get_session(session_id)
     try:
         return env.state().model_dump()
@@ -233,12 +196,6 @@ async def state(session_id: Optional[str] = None) -> dict[str, Any]:
 
 @app.post("/grade")
 async def grade_endpoint(request: GradeRequest) -> dict[str, Any]:
-    """
-    Grade the current state and return score.
-
-    Body: {"session_id": "<optional>", "task_name": "<optional>"}
-    Returns: {"task": str, "score": float, "status": str}
-    """
     env = _get_session(request.session_id)
 
     try:
@@ -246,10 +203,8 @@ async def grade_endpoint(request: GradeRequest) -> dict[str, Any]:
 
         current_state = env.state()
         task_name     = request.task_name or current_state.task_name or "easy"
-
-        # Build grader-compatible flat dict
-        state_dict = _flatten_for_grader(current_state)
-        score       = grade(task_name, state_dict)
+        state_dict    = _flatten_for_grader(current_state)
+        score         = grade(task_name, state_dict)
 
         return {
             "task":   task_name,
@@ -270,10 +225,8 @@ async def list_sessions() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _flatten_for_grader(ws: Any) -> dict[str, Any]:
-    """Convert WorkforceState model to flat dict for graders."""
     d = ws.model_dump()
 
-    # Ensure documents are plain dicts
     docs = {}
     for name, doc in d.get("documents", {}).items():
         docs[name] = doc if isinstance(doc, dict) else {
@@ -281,13 +234,11 @@ def _flatten_for_grader(ws: Any) -> dict[str, Any]:
         }
     d["documents"] = docs
 
-    # Ensure departments is a plain dict
     depts = d.get("departments", {})
     if not isinstance(depts, dict):
         depts = {"HR": depts.HR, "Legal": depts.Legal, "Finance": depts.Finance}
     d["departments"] = depts
 
-    # Ensure compliance is a plain dict
     comp = d.get("compliance", {})
     if not isinstance(comp, dict):
         comp = {
@@ -298,7 +249,6 @@ def _flatten_for_grader(ws: Any) -> dict[str, Any]:
         }
     d["compliance"] = comp
 
-    # Flatten conflicts
     conflicts = d.get("conflicts", [])
     d["conflicts"] = [
         c if isinstance(c, dict) else {

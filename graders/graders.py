@@ -4,7 +4,7 @@ graders/graders.py
 Deterministic graders for all three openenv-workforce tasks.
 
 SCORING DESIGN:
-  Each grader computes a score in (0.0, 1.0) from state completeness.
+  Each grader computes a score in [0.0, 1.0] from state completeness.
   Scores are based ONLY on what the task actually requires —
   consistent with required_departments and required_compliance in tasks.py.
 
@@ -24,13 +24,6 @@ Author: Team AI Kalesh
 from __future__ import annotations
 
 from typing import Any
-
-
-# ---------------------------------------------------------------------------
-# CRITICAL: Epsilon to ensure scores are NEVER exactly 0.0 or 1.0
-# ---------------------------------------------------------------------------
-
-_EPSILON = 0.0001  # Ensures all scores are strictly in (0, 1), not [0, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -74,9 +67,9 @@ _TASK_DEPARTMENTS: dict[str, list[str]] = {
 # ---------------------------------------------------------------------------
 
 _TASK_CEILING: dict[str, float] = {
-    "easy":   0.95,
-    "medium": 0.75,
-    "hard":   0.60,
+    "easy":   0.949,  # strict upper bound (never exactly 1.0)
+    "medium": 0.749,  # strict upper bound
+    "hard":   0.599,  # strict upper bound
 }
 
 # ---------------------------------------------------------------------------
@@ -164,7 +157,7 @@ def grade(task_name: str, state: dict[str, Any]) -> float:
         state:     Episode state dict.
 
     Returns:
-        Float strictly in (0.0, 1.0) — never exactly 0.0 or 1.0.
+        Float in [0.0, 1.0].
     """
     graders = {
         "easy":   grade_easy,
@@ -176,8 +169,10 @@ def grade(task_name: str, state: dict[str, Any]) -> float:
             f"Unknown task '{task_name}'. Valid: {list(graders.keys())}"
         )
     score = graders[task_name](state)
-    # Final safety clamp — scores must always be strictly in (0.0, 1.0)
-    assert 0.0 < score < 1.0, f"Grader returned out-of-range score: {score}"
+    # Final safety clamp — scores must always be in [0.0, 1.0]
+    # Enforce STRICT bounds (0.0 and 1.0 both rejected by validator)
+    score = max(0.001, min(0.999, score))
+    assert 0.001 <= score <= 0.999, f"Score out of strict range: {score}"
     return score
 
 
@@ -202,7 +197,7 @@ def explain(task_name: str, state: dict[str, Any]) -> str:
 #   Compliance            0.25   (tax_id 0.125 + payroll 0.125)
 #   Finalized             0.10
 #
-# A perfect agent scores: 1.0 → clamped to 0.9499 (< 0.95)
+# A perfect agent scores: 1.0 → clamped to 1.0
 # Expected range: 0.70 – 1.00
 # ---------------------------------------------------------------------------
 
@@ -238,10 +233,7 @@ def grade_easy(state: dict[str, Any]) -> float:
     # Parsimony penalty
     raw -= _parsimony_penalty(prev_acts, _EASY_VALID_ACTIONS)
 
-    # Apply epsilon bounds: never exactly 0.0 or ceiling
-    final_score = max(_EPSILON, min(_TASK_CEILING["easy"] - _EPSILON, raw))
-    
-    return round(final_score, 4)
+    return round(max(0.0, min(_TASK_CEILING["easy"], raw)), 4)
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +246,7 @@ def grade_easy(state: dict[str, Any]) -> float:
 #   Compliance            0.25   (payroll 0.08 + pdpa 0.09 + shadow 0.08)
 #   Finalized             0.10
 #
-# A perfect agent scores: 1.0 → clamped to 0.7499 (< 0.75)
+# A perfect agent scores: 1.0 → clamped to 1.0
 # Expected range: 0.40 – 0.80
 # ---------------------------------------------------------------------------
 
@@ -293,26 +285,26 @@ def grade_medium(state: dict[str, Any]) -> float:
     # Parsimony penalty
     raw -= _parsimony_penalty(prev_acts, _MEDIUM_VALID_ACTIONS)
 
-    # Apply epsilon bounds: never exactly 0.0 or ceiling
-    final_score = max(_EPSILON, min(_TASK_CEILING["medium"] - _EPSILON, raw))
-    
-    return round(final_score, 4)
+    return round(max(0.0, min(_TASK_CEILING["medium"], raw)), 4)
 
 
 # ---------------------------------------------------------------------------
 # HARD grader — India → Germany + UAE
 #
-# Weights (sum = 0.90, ceiling = 0.60):
-#   Documents verified    0.25
-#   HR approved           0.08
-#   Legal approved        0.08
-#   Finance approved      0.08
-#   Compliance done       0.16  (tax_id 0.08 + payroll 0.08)
-#   Conflict resolved     0.15
-#   Finalized             0.10
-#                  TOTAL  0.90  → perfect raw = 0.90, capped at 0.5999
+# Weights (sum = 1.0):
+#   Documents verified    0.25   (4 docs, 0.0625 each)
+#   HR approved           0.10
+#   Legal approved        0.10
+#   Finance approved      0.10
+#   Compliance            0.15   (tax_id 0.075 + payroll 0.075)
+#   UAE no-tax respected  0.20   (critical rule — NOT calling set_tax_id:UAE)
+#   Conflict resolved     0.10
+#   Finalized             0.10   (requires above all to be valid)
+#                  TOTAL  1.10   → clamped to 1.0
 #
-# UAE trap penalty: -0.25 if set_tax_id:UAE called
+# UAE no-tax rule: agent gets 0.20 for NOT calling set_tax_id:UAE
+# If agent calls set_tax_id:UAE → loses 0.20 + gets extra -0.10 penalty
+#
 # Expected range: 0.20 – 0.60
 # ---------------------------------------------------------------------------
 
@@ -321,8 +313,8 @@ def grade_hard(state: dict[str, Any]) -> float:
     Hard grader — India → Germany + UAE.
 
     Calibrated so:
-      - Empty state:   ~0.0001 (epsilon floor)
-      - Perfect agent: ~0.5999 (just below 0.60 ceiling)
+      - Empty state:   ~0.00
+      - Perfect agent: ~0.55 (inside 0.20-0.60 range)
       - UAE tax violation: drops below 0.20
 
     Weights (sum = 0.90, ceiling = 0.60):
@@ -333,7 +325,7 @@ def grade_hard(state: dict[str, Any]) -> float:
       Compliance done       0.16  (tax_id 0.08 + payroll 0.08)
       Conflict resolved     0.15
       Finalized             0.10
-                     TOTAL  0.90  → perfect raw = 0.90, capped at 0.5999
+                     TOTAL  0.90  → perfect raw = 0.90, capped at 0.60
 
     UAE trap penalty: -0.25 if set_tax_id:UAE called
     This gives UAE violators ~0.30 maximum (below 0.60 ceiling).
@@ -392,11 +384,8 @@ def grade_hard(state: dict[str, Any]) -> float:
     # Parsimony penalty
     raw -= _parsimony_penalty(prev_acts, _HARD_VALID_ACTIONS)
 
-    # Apply epsilon bounds: never exactly 0.0 or ceiling
-    # Hard ceiling: 0.60 — perfect agent scores 0.90 raw → capped at 0.5999
-    final_score = max(_EPSILON, min(0.60 - _EPSILON, raw))
-    
-    return round(final_score, 4)
+    # Hard ceiling: 0.60 — perfect agent scores 0.90 raw → capped at 0.60
+    return round(max(0.0, min(0.60, raw)), 4)
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +462,7 @@ def _explain_hard(state: dict[str, Any]) -> str:
         f"Legal:            {'✓' if depts.get('Legal') else '✗'}",
         f"Finance:          {'✓' if depts.get('Finance') else '✗'}",
         f"Compliance:       {len(comp_done)}/{len(required_comp)} done {comp_done}",
-        f"UAE no-tax rule:  {'✗ VIOLATED (-0.25)' if uae_tax_called else '✓ respected'}",
+        f"UAE no-tax rule:  {'✗ VIOLATED (-0.30)' if uae_tax_called else '✓ respected (+0.20)'}",
         f"Conflicts:        {'✓ resolved' if resolved else '✗ unresolved'}",
         f"Status:           {status}",
         f"Score:            {grade_hard(state):.4f}",
@@ -486,15 +475,15 @@ def _explain_hard(state: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def grade_all(states: dict[str, dict[str, Any]]) -> dict[str, float]:
-    """Grade all three tasks. Missing tasks default to epsilon floor."""
+    """Grade all three tasks. Missing tasks default to 0.0."""
     results: dict[str, float] = {}
     for task_name in ["easy", "medium", "hard"]:
         if task_name in states:
             try:
                 results[task_name] = grade(task_name, states[task_name])
             except Exception as exc:
-                results[task_name] = _EPSILON
+                results[task_name] = 0.0
                 print(f"[grader] ERROR grading '{task_name}': {exc}")
         else:
-            results[task_name] = _EPSILON
+            results[task_name] = 0.0
     return results

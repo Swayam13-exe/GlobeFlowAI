@@ -13,7 +13,7 @@ license: mit
 
 [![OpenEnv Compatible](https://img.shields.io/badge/OpenEnv-Compatible-blue)](https://github.com/meta-pytorch/OpenEnv)
 [![HuggingFace Space](https://img.shields.io/badge/HuggingFace-Space-yellow)](https://huggingface.co/spaces/Swayam14/openenv-workforce)
-[![Python 3.11](https://img.shields.io/badge/Python-3.11-green)](https://python.org)
+[![Python 3.10](https://img.shields.io/badge/Python-3.10-green)](https://python.org)
 
 An OpenEnv-compatible reinforcement learning environment where an AI agent handles **real-world employee relocation cases** — processing documents, navigating multi-country compliance rules, and managing department approvals to finalize international transfers.
 

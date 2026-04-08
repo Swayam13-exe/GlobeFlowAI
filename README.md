@@ -1,352 +1,430 @@
----
-title: OpenEnv Workforce Mobility
-emoji: 🏢
-colorFrom: indigo
-colorTo: blue
-sdk: docker
-app_port: 7860
-pinned: false
-license: mit
----
+# GlobeFlowAI — Global Mobility & Compliance Orchestrator
 
-# OpenEnv Workforce Mobility
+[![OpenEnv Compatible](https://img.shields.io/badge/OpenEnv-Compatible-blue)](https://github.com/meta-pytorch/OpenEnv)
+[![HuggingFace Space](https://img.shields.io/badge/HuggingFace-Space-yellow)](https://huggingface.co/spaces/Swayam14/openenv-workforce)
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-green)](https://python.org)
 
-**A deterministic simulation environment for AI workforce mobility compliance agents.**
+An OpenEnv-compatible reinforcement learning environment where an AI agent handles **real-world employee relocation cases** — processing documents, navigating multi-country compliance rules, and managing department approvals to finalize international transfers.
+
+Built for the **Meta × Scaler OpenEnv AI Hackathon 2026**.
 
 ---
 
-## Environment Description and Motivation
+## What is GlobeFlowAI?
 
-Employee relocation between countries is a high-stakes business process involving multi-department approvals (HR, Legal, Finance) and strict country-specific compliance rules. A single mistake—like attempting to register a tax ID in a zero-tax jurisdiction—can derail the entire relocation timeline and expose the company to legal risks.
+GlobeFlowAI simulates the full lifecycle of relocating an employee from **India** to one of three destination countries: **Germany**, **Singapore**, or **UAE**. The agent must learn to:
 
-`openenv-workforce` challenges AI agents to act as **Workforce Solutions Architects**, making sequential decisions that directly impact relocation success. The environment features:
+- Request and verify the correct documents for each country
+- Obtain department approvals in the correct order (HR → Legal → Finance)
+- Configure country-specific compliance items (tax registration, payroll, PDPA consent)
+- Resolve multi-country rule conflicts (e.g. Germany requires tax ID, UAE does not allow it)
+- Finalize the relocation case without errors
 
-- **Multi-Department Workflow:** Simulates real corporate dependency chains where Legal cannot approve until all documents are verified, and Finance cannot approve until Legal signs off.
-- **Country-Specific Rules:** Each destination country (Germany, Singapore, UAE) has unique visa, tax, and compliance requirements.
-- **Critical Trap:** UAE has no income tax—agents must recognize this and avoid calling `set_tax_id` for UAE, despite the pattern working for other countries.
-- **Progressive Difficulty:** Three tasks ranging from straightforward single-country relocation to complex multi-country coordination with rule conflicts.
+This environment models a genuine enterprise workflow that multinational companies deal with thousands of times per year — making it a rich, non-trivial domain for agent training and evaluation.
 
-This environment tests whether AI agents can:
-1. Follow complex prerequisite chains
-2. Distinguish between country-specific rules vs. universal patterns
-3. Optimize for efficiency (avoiding unnecessary actions)
-4. Handle ambiguous situations where the obvious action is wrong
+---
+
+## Environment Design
+
+### Architecture
+
+```
+GlobeFlowAI/
+├── env/
+│   ├── environment.py      # Core WorkforceEnv — reset/step/state
+│   ├── models.py           # Pydantic v2 typed models
+│   ├── validators.py       # Pure validation functions
+│   ├── reward.py           # Shaped reward function
+│   ├── tasks.py            # Task definitions (easy/medium/hard)
+│   ├── rules.py            # Re-export of rules engine
+│   ├── rules_engine.py     # Country rules, fixture loading
+│   └── graders.py          # Shim → graders/graders.py
+├── graders/
+│   └── graders.py          # Deterministic task graders
+├── server/
+│   └── app.py              # FastAPI entry point
+├── fixtures/
+│   ├── country_rules.json  # Per-country compliance rules
+│   ├── visa_types.json     # Visa type metadata
+│   └── tax_treaties.json   # India bilateral tax treaties
+├── main.py                 # FastAPI app with session management
+├── inference.py            # OpenAI-powered baseline agent
+├── openenv.yaml            # OpenEnv spec metadata
+├── Dockerfile              # Container definition
+└── requirements.txt        # Python dependencies
+```
+
+### State Design
+
+The environment maintains a stateful `WorkforceState` with:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `case_id` | str | Unique case identifier |
+| `task_name` | str | easy / medium / hard |
+| `employee` | EmployeeRecord | Role and dependent status |
+| `countries` | list[str] | Destination countries (1–2) |
+| `documents` | dict | Document name → status + validity |
+| `departments` | dict | HR / Legal / Finance approval flags |
+| `compliance` | dict | tax_id / payroll / pdpa / shadow_payroll |
+| `conflicts` | list | Active rule conflicts (hard task) |
+| `deadline_days` | int | Steps remaining before auto-fail |
+| `progress` | float | Completion fraction [0.0, 1.0] |
+| `status` | str | in_progress / success / failed |
 
 ---
 
 ## Action Space
 
-Agents interact using discrete `{action_type, target}` pairs. All actions are validated against the current state before execution.
+| Action Type | Target | Description |
+|-------------|--------|-------------|
+| `request_document` | document name | Submit a document for verification |
+| `verify_document` | document name | Verify a submitted document |
+| `approve_hr` | *(empty)* | HR department approval |
+| `approve_legal` | *(empty)* | Legal approval (requires all docs verified) |
+| `approve_finance` | *(empty)* | Finance approval (requires Legal + no conflicts) |
+| `set_payroll` | *(empty)* | Configure host-country payroll |
+| `set_tax_id` | *(empty)* | Register tax ID (Germany only — **not UAE**) |
+| `set_shadow_payroll` | *(empty)* | Enable shadow payroll (Singapore only) |
+| `set_pdpa` | *(empty)* | Collect PDPA consent (Singapore only) |
+| `resolve_conflict` | *(empty)* | Resolve a rule conflict (hard task) |
+| `finalize_case` | *(empty)* | Close the case (all requirements must be met) |
 
-| Action Type | Valid Targets | Description | Prerequisites |
-|-------------|---------------|-------------|---------------|
-| `request_document` | `passport`, `visa`, `employment_letter`, `work_permit` | Request document submission | None |
-| `verify_document` | `passport`, `visa`, `employment_letter`, `work_permit` | Verify submitted document | Document must be requested first |
-| `approve_hr` | `""` (empty) | Grant HR department approval | None |
-| `approve_legal` | `""` | Grant Legal approval | **All required documents verified** |
-| `approve_finance` | `""` | Grant Finance approval | **Legal approved + conflicts resolved (hard task)** |
-| `set_payroll` | `""` or country name | Register payroll system | None |
-| `set_tax_id` | `""` or country name | Register tax ID | **NEVER use for UAE (no income tax)** |
-| `set_shadow_payroll` | `""` | Configure shadow payroll | Singapore only |
-| `set_pdpa` | `""` | Set PDPA consent | Singapore only |
-| `resolve_conflict` | `""` | Resolve rule conflicts | Hard task only, before Finance approval |
-| `finalize_case` | `""` or `"all"` | Complete the episode | All blockers resolved |
-
-### Action Results
-
-| Result Code | Reward | Meaning |
-|-------------|--------|---------|
-| `success` | +0.4 | Action executed successfully |
-| `wrong_action` | -0.1 | Valid action type, wrong context (e.g., verifying unsubmitted doc) |
-| `prereq_violated` | -0.2 | Dependency order broken (e.g., Legal before docs verified) |
-| `rule_violation` | -0.3 | Country rule broken (e.g., `set_tax_id:UAE`) |
-| `invalid_action` | -0.4 | Malformed or unknown action |
+**Action format:**
+```json
+{"action_type": "request_document", "target": "passport"}
+{"action_type": "approve_hr", "target": ""}
+```
 
 ---
 
 ## Observation Space
 
-Each `/reset` or `/step` call returns an observation containing:
+After every `reset()` and `step()`, the agent receives an `Observation` containing:
 
-### Core Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `state` | `WorkforceState` | Complete environment state |
-| `available_actions` | `list[str]` | Valid actions in current state |
-| `current_blockers` | `list[str]` | Reasons preventing finalization |
-| `last_action_result` | `str` | Result code of previous action |
-| `last_action_error` | `str` | Error message if action failed |
-| `steps_taken` | `int` | Number of actions taken |
-| `done` | `bool` | Episode ended |
-
-### WorkforceState Structure
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `task_name` | `str` | Current task (`easy`, `medium`, `hard`) |
-| `countries` | `list[str]` | Destination countries |
-| `employee_role` | `str` | Employee's position |
-| `has_dependents` | `bool` | Whether employee has family members |
-| `documents` | `dict` | `{doc_name: {status, is_valid}}` |
-| `departments` | `dict` | `{dept_name: approved_bool}` |
-| `compliance` | `dict` | `{compliance_item: completed_bool}` |
-| `conflicts` | `list[dict]` | Rule conflicts (hard task only) |
-| `progress` | `float` | Checklist completion [0.0, 1.0] |
-| `status` | `str` | `in_progress`, `success`, or `failed` |
-| `deadline_days` | `int` | Days until relocation deadline |
+| Field | Description |
+|-------|-------------|
+| `state` | Full `WorkforceState` (documents, departments, compliance, conflicts) |
+| `available_actions` | List of currently valid actions the agent can take |
+| `current_blockers` | Reasons `finalize_case` cannot be called yet |
+| `last_action_result` | Result code of the last action |
+| `last_action_error` | Error detail if last action failed |
+| `steps_taken` | Number of steps used this episode |
+| `done` | True when episode has ended |
 
 ---
 
-## Task Descriptions with Expected Difficulty
+## Tasks
 
-### Easy: India → Germany (Single Country, Linear Path)
+### Task 1 — Easy: India → Germany
 
-**Scenario:** Engineer relocating to Germany, no dependents.
+**Scenario:** Relocate an Engineer from India to Germany via EU Blue Card pathway.
 
-**Required Actions:**
-- **Documents:** Request and verify `passport`, `visa`, `employment_letter`, `work_permit` (4 docs)
-- **Departments:** HR approval only
-- **Compliance:** Register `tax_id` and `payroll` for Germany
-- **Finalize:** Call `finalize_case` when all requirements met
+| Property | Value |
+|----------|-------|
+| Countries | Germany |
+| Employee | Engineer, no dependents |
+| Documents required | passport, visa, employment_letter, work_permit |
+| Departments required | HR only |
+| Compliance required | tax_id, payroll |
+| Deadline | 20 steps |
+| Max steps | 25 |
+| Expected score range | 0.70 – 0.95 |
 
-**Difficulty Factors:**
-- Linear dependency chain (straightforward order)
-- Single destination country
-- No special compliance rules
-- Optimal path: ~11 steps
-
-**Expected Score Range:** 0.70 – 1.00  
-**Score Ceiling:** 0.95  
-**Deadline:** 20 days
-
----
-
-### Medium: India → Singapore (Multiple Compliance, No Tax ID)
-
-**Scenario:** Manager with dependents relocating to Singapore.
-
-**Required Actions:**
-- **Documents:** Request and verify `passport`, `visa`, `employment_letter` (3 docs, **NOT** `work_permit`)
-- **Departments:** HR + Legal approval
-- **Compliance:** Register `payroll`, set `pdpa` consent, configure `shadow_payroll`
-- **Critical:** Singapore does **NOT** require `tax_id` (calling it wastes steps)
-- **Finalize:** Call `finalize_case` when all requirements met
-
-**Difficulty Factors:**
-- More compliance items than Easy (3 vs. 2)
-- Two department approvals required
-- Must recognize Singapore's unique requirements
-- Optimal path: ~12 steps
-
-**Expected Score Range:** 0.40 – 0.80  
-**Score Ceiling:** 0.75  
-**Deadline:** 25 days
+**Optimal sequence (~11 steps):**
+```
+request + verify (x4 docs) → approve_hr → set_tax_id → set_payroll → finalize_case
+```
 
 ---
 
-### Hard: India → Germany + UAE (Multi-Country, Critical Trap)
+### Task 2 — Medium: India → Singapore
 
-**Scenario:** Director relocating simultaneously to Germany and UAE.
+**Scenario:** Relocate a Manager with dependents from India to Singapore via Employment Pass.
 
-**Required Actions:**
-- **Documents:** Request and verify `passport`, `visa`, `employment_letter`, `work_permit` (4 docs)
-- **Departments:** HR + Legal + Finance approval
-- **Compliance:** Register `tax_id` (Germany only) and `payroll`
-- **Conflict Resolution:** Call `resolve_conflict` **before** `approve_finance`
-- **Critical Trap:** **NEVER** call `set_tax_id:UAE` (UAE has no income tax, -0.25 penalty)
-- **Finalize:** Call `finalize_case` when all requirements met
+| Property | Value |
+|----------|-------|
+| Countries | Singapore |
+| Employee | Manager, has dependents |
+| Documents required | passport, visa, employment_letter |
+| Departments required | HR, Legal |
+| Compliance required | payroll, pdpa, shadow_payroll |
+| Deadline | 25 steps |
+| Max steps | 25 |
+| Expected score range | 0.40 – 0.75 |
 
-**Difficulty Factors:**
-- Multi-country coordination
-- Three department approvals (longest chain)
-- Must resolve conflicts before Finance approval
-- **UAE Tax Trap:** Pattern from Germany doesn't apply to UAE
-- Optimal path: ~16 steps
+**Key rules:**
+- Singapore does **NOT** require tax_id — calling `set_tax_id` incurs a −0.30 penalty
+- PDPA consent must be collected before finalization
+- Shadow payroll is mandatory for home-country tax tracking
+- Legal must approve before `finalize_case`
 
-**Expected Score Range:** 0.20 – 0.60  
-**Score Ceiling:** 0.60  
-**Deadline:** 30 days
+**Optimal sequence (~11 steps):**
+```
+request + verify (x3 docs) → approve_hr → approve_legal →
+set_payroll → set_pdpa → set_shadow_payroll → finalize_case
+```
 
 ---
 
-## Setup and Usage Instructions
+### Task 3 — Hard: India → Germany + UAE
+
+**Scenario:** Simultaneous relocation of a Director with dependents to both Germany and UAE.
+
+| Property | Value |
+|----------|-------|
+| Countries | Germany, UAE |
+| Employee | Director, has dependents |
+| Documents required | passport, visa, employment_letter, work_permit |
+| Departments required | HR, Legal, Finance |
+| Compliance required | tax_id (Germany only), payroll |
+| Deadline | 30 steps |
+| Max steps | 25 |
+| Expected score range | 0.20 – 0.60 |
+
+**Critical trap — UAE has NO income tax:**
+> ⚠️ Calling `set_tax_id` with target `UAE` is a **rule violation** that incurs a −0.30 reward penalty AND reduces the final grader score significantly. Agents must learn to call `set_tax_id` for Germany ONLY.
+
+**Key rules:**
+- A `tax_conflict` exists between Germany (requires tax_id) and UAE (no income tax)
+- `resolve_conflict` must be called **before** `approve_finance`
+- Finance cannot approve while unresolved conflicts remain
+- All 4 documents must be verified before Legal can approve
+
+**Optimal sequence (~14 steps):**
+```
+request + verify (x4 docs) → approve_hr → approve_legal →
+set_tax_id (Germany) → set_payroll → resolve_conflict →
+approve_finance → finalize_case
+```
+
+---
+
+## Reward Function
+
+### Per-Step Rewards
+
+| Event | Reward |
+|-------|--------|
+| Successful action | +0.30 |
+| Document verified (milestone) | +0.20 bonus |
+| Department approved (milestone) | +0.20 bonus |
+| Compliance item set (milestone) | +0.15 bonus |
+| Conflict resolved (milestone) | +0.25 bonus |
+| Episode finalized successfully | +0.50 bonus |
+| Progress increase | +0.05 × delta |
+| Wrong action (valid type, wrong context) | −0.10 |
+| Prerequisite violated | −0.20 |
+| Rule violation (e.g. UAE tax) | −0.30 |
+| Invalid action (unknown type) | −0.30 |
+| Repeated action | −0.10 |
+
+All per-step rewards are clamped to `[−1.0, 1.0]`.
+
+### Partial Progress Shaping
+
+The reward function provides dense signal throughout the episode — not just at the end. Progress is computed as a weighted sum:
+
+- Documents: 40%
+- Departments: 35%
+- Compliance: 15%
+- Conflict resolution: 10%
+
+This means agents receive gradient signal even when they never reach `finalize_case`.
+
+---
+
+## Grader System
+
+Each task has a deterministic grader that returns a score strictly in `(0.0, 1.0)` — exclusive bounds required by the OpenEnv validator.
+
+### Easy Grader Weights
+| Component | Weight |
+|-----------|--------|
+| Documents verified (4 docs) | 0.40 |
+| HR approved | 0.25 |
+| Compliance done (tax_id + payroll) | 0.25 |
+| Case finalized | 0.10 |
+| Ceiling | 0.949 |
+
+### Medium Grader Weights
+| Component | Weight |
+|-----------|--------|
+| Documents verified (3 docs) | 0.30 |
+| HR approved | 0.15 |
+| Legal approved | 0.20 |
+| Compliance done (payroll + pdpa + shadow) | 0.25 |
+| Case finalized | 0.10 |
+| Ceiling | 0.749 |
+
+### Hard Grader Weights
+| Component | Weight |
+|-----------|--------|
+| Documents verified (4 docs) | 0.25 |
+| HR approved | 0.08 |
+| Legal approved | 0.08 |
+| Finance approved | 0.08 |
+| Compliance done (tax_id + payroll) | 0.16 |
+| Conflict resolved | 0.15 |
+| Case finalized | 0.10 |
+| UAE tax violation penalty | −0.25 |
+| Ceiling | 0.599 |
+
+---
+
+## HTTP API
+
+The environment runs as a FastAPI server on port 7860.
+
+### Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/` | Health check — returns `{"status": "ok"}` |
+| GET | `/health` | Health check (explicit) |
+| GET | `/tasks` | List available tasks |
+| POST | `/reset` | Start new episode `{"task_name": "easy"}` |
+| POST | `/step` | Apply action `{"action_type": "...", "target": "..."}` |
+| GET | `/state` | Current state (query param `?session_id=...`) |
+| POST | `/grade` | Get current grader score |
+
+### Example
+
+```bash
+# Reset
+curl -X POST http://localhost:7860/reset \
+  -H "Content-Type: application/json" \
+  -d '{"task_name": "easy"}'
+
+# Step
+curl -X POST http://localhost:7860/step \
+  -H "Content-Type: application/json" \
+  -d '{"action_type": "request_document", "target": "passport"}'
+
+# Grade
+curl -X POST http://localhost:7860/grade \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+---
+
+## Setup & Usage
 
 ### Prerequisites
+
 - Python 3.11+
-- pip
-- (Optional) Docker for containerized deployment
+- Docker
+- OpenAI API key
 
 ### Local Installation
 
 ```bash
-# Clone the repository
-git clone https://huggingface.co/spaces/Swayam14/openenv-workforce
+# Clone the repo
+git clone https://github.com/Swayam14/openenv-workforce
 cd openenv-workforce
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate      # Linux/macOS
-# venv\Scripts\activate.bat   # Windows
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Set environment variables (for inference)
-export API_BASE_URL="https://api.openai.com/v1"
-export MODEL_NAME="gpt-4o-mini"
-export HF_TOKEN="your_token_here"
+# Set environment variables
+export HF_TOKEN=your_openai_api_key
+export API_BASE_URL=https://api.openai.com/v1
+export MODEL_NAME=gpt-4o-mini
 
-# Start the API server
+# Start the server
 uvicorn main:app --host 0.0.0.0 --port 7860
 ```
 
-### Docker Deployment
+### Run the Baseline Agent
 
 ```bash
-# Build the image
-docker build -t openenv-workforce .
-
-# Run the container
-docker run -p 7860:7860 \
-  -e API_BASE_URL="https://api.openai.com/v1" \
-  -e MODEL_NAME="gpt-4o-mini" \
-  -e HF_TOKEN="your_token_here" \
-  openenv-workforce
-```
-
-### Running Inference
-
-```bash
-# Configure environment variables
-export API_BASE_URL="https://api.openai.com/v1"
-export MODEL_NAME="gpt-4o-mini"
-export HF_TOKEN="your_token_here"
-
-# Run inference on all three tasks
 python inference.py
 ```
 
-### Running Tests
+### Run Tests
 
 ```bash
-# Execute evaluation test suite (7 tests)
 python test_eval.py
 ```
 
-### API Usage Examples
+### Docker
 
-**Start a new episode:**
 ```bash
-curl -X POST http://localhost:7860/reset \
-  -H "Content-Type: application/json" \
-  -d '{"task_name": "easy"}'
-```
+# Build
+docker build -t globeflowai .
 
-**Take an action:**
-```bash
-curl -X POST http://localhost:7860/step \
-  -H "Content-Type: application/json" \
-  -d '{
-    "session_id": "YOUR_SESSION_ID",
-    "action_type": "request_document",
-    "target": "passport"
-  }'
-```
-
-**Get current state:**
-```bash
-curl "http://localhost:7860/state?session_id=YOUR_SESSION_ID"
-```
-
-**Grade final state:**
-```bash
-curl -X POST http://localhost:7860/grade \
-  -H "Content-Type: application/json" \
-  -d '{"session_id": "YOUR_SESSION_ID"}'
+# Run
+docker run -p 7860:7860 \
+  -e HF_TOKEN=your_openai_api_key \
+  -e API_BASE_URL=https://api.openai.com/v1 \
+  -e MODEL_NAME=gpt-4o-mini \
+  globeflowai
 ```
 
 ---
 
 ## Baseline Scores
 
-### Score Ranges by Task
-
-| Task | Expected Range | Score Ceiling | Optimal Steps | Difficulty |
-|------|----------------|---------------|---------------|------------|
-| **Easy** (India → Germany) | 0.70 – 1.00 | 0.95 | ~11 | 🟢 Low |
-| **Medium** (India → Singapore) | 0.40 – 0.80 | 0.75 | ~12 | 🟡 Medium |
-| **Hard** (India → Germany + UAE) | 0.20 – 0.60 | 0.60 | ~16 | 🔴 High |
-
-### Scoring Methodology
-
-Scores are computed deterministically from state completeness using weighted components:
-
-**Easy Task Weights (Total: 1.0):**
-- Documents verified: 0.40 (0.10 per doc × 4)
-- HR approved: 0.25
-- Compliance complete: 0.25 (tax_id + payroll)
-- Successfully finalized: 0.10
-
-**Medium Task Weights (Total: 1.0):**
-- Documents verified: 0.30 (0.10 per doc × 3)
-- HR approved: 0.15
-- Legal approved: 0.20
-- Compliance complete: 0.25 (payroll + pdpa + shadow_payroll)
-- Successfully finalized: 0.10
-
-**Hard Task Weights (Total: 0.90, capped at 0.60):**
-- Documents verified: 0.25 (0.0625 per doc × 4)
-- HR approved: 0.08
-- Legal approved: 0.08
-- Finance approved: 0.08
-- Compliance complete: 0.16 (tax_id + payroll)
-- Conflict resolved: 0.15
-- Successfully finalized: 0.10
-- **UAE tax penalty:** -0.25 if `set_tax_id:UAE` called
-
-### Penalties
-
-**Parsimony Penalty:** -0.03 per unnecessary action (capped at -0.15)
-- Example: Requesting `degree_certificate` when not required
-
-**Rule Violation Penalty:** -0.25 to -0.30
-- Example: Calling `set_tax_id:UAE` (UAE has no income tax)
-
-**Prerequisite Penalty:** -0.20 per violation
-- Example: Attempting Legal approval before documents verified
-
-### Why Score Ceilings?
-
-Ceilings ensure that perfect execution on harder tasks scores **lower** than partial execution on easier tasks, maintaining difficulty ordering:
-
-```
-Task      Ceiling   Perfect Agent Score
-────────  ────────  ───────────────────
-Easy      0.95      ~0.85–0.95
-Medium    0.75      ~0.65–0.75
-Hard      0.60      ~0.50–0.60
-```
-
-This design ensures that:
-1. A flawless Easy run always scores higher than a flawless Hard run
-2. Agents cannot "game" the system by cherry-picking hard tasks
-3. Score ranges never overlap between difficulty tiers
-
-### Sample Baseline Results
-
 Running `python inference.py` with `gpt-4o-mini`:
 
 ```
-EASY     | score=0.850 | steps=11 | success
-MEDIUM   | score=0.680 | steps=13 | success
-HARD     | score=0.420 | steps=17 | success
+EASY     | score=0.780 | steps=14 | success
+MEDIUM   | score=0.750 | steps=13 | success
+HARD     | score=0.600 | steps=15 | success
 
-Average Score: 0.650
+Average Score: 0.710
 ```
+
+### Score Interpretation
+
+| Task | Score Range | Difficulty | Why |
+|------|-------------|------------|-----|
+| Easy | 0.70 – 0.95 | Low | Single country, only HR needed, no compliance traps |
+| Medium | 0.40 – 0.75 | Medium | Singapore-specific rules, PDPA + shadow payroll |
+| Hard | 0.20 – 0.60 | High | Multi-country conflict, UAE tax trap, Finance required |
+
+Scores decrease with task difficulty, reflecting the increasing number of rules the agent must learn and the cost of mistakes like calling `set_tax_id` for UAE (−0.30 reward + grader penalty).
+
+---
+
+## Country Rules Summary
+
+| Rule | Germany | Singapore | UAE |
+|------|---------|-----------|-----|
+| Visa required | ✓ | ✓ | ✓ |
+| Tax ID required | ✓ | ✗ | ✗ (**no income tax**) |
+| Payroll required | ✓ | ✓ | ✓ |
+| PDPA consent | ✗ | ✓ | ✗ |
+| Shadow payroll | ✗ | ✓ | ✗ |
+| Finance approval | ✓ | ✗ | ✓ |
+
+---
+
+## OpenEnv Spec Compliance
+
+- ✅ `reset()` → returns typed `Observation`
+- ✅ `step(action)` → returns typed `StepResult` with `observation`, `reward`, `done`, `info`
+- ✅ `state()` → returns typed `WorkforceState`
+- ✅ Pydantic v2 typed models throughout
+- ✅ `openenv.yaml` with task registry
+- ✅ Dockerfile builds and runs cleanly
+- ✅ FastAPI server on port 7860
+- ✅ `/health` endpoint responds to HuggingFace Space ping
+- ✅ All grader scores strictly between 0 and 1 (exclusive)
+- ✅ `inference.py` uses OpenAI client with `API_BASE_URL`, `MODEL_NAME`, `HF_TOKEN`
+- ✅ `[START]` / `[STEP]` / `[END]` stdout logging format
+
+---
+
+## Team
+
+**Team AI Kalesh**
+
+Built for the Meta × Scaler OpenEnv AI Hackathon — India 2026.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License.
+BSD-3-Clause

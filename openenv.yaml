@@ -10,8 +10,7 @@ description: >
   visa, tax, payroll, and compliance rules. Includes the UAE no-tax trap
   and multi-country conflict resolution for the hard task.
 
-# FIX: entrypoint must point to the FastAPI app OBJECT, not the main() function
-entrypoint: server.app:app
+entrypoint: main:app
 port: 7860
 
 env:

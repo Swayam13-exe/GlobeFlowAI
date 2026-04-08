@@ -1,3 +1,14 @@
+---
+title: OpenEnv Workforce Mobility
+emoji: 🏢
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+license: mit
+---
+
 # GlobeFlowAI — Global Mobility & Compliance Orchestrator
 
 [![OpenEnv Compatible](https://img.shields.io/badge/OpenEnv-Compatible-blue)](https://github.com/meta-pytorch/OpenEnv)
@@ -427,4 +438,4 @@ Built for the Meta × Scaler OpenEnv AI Hackathon — India 2026.
 
 ## License
 
-BSD-3-Clause
+This project is licensed under the MIT License.

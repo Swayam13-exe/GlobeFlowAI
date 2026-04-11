@@ -74,9 +74,10 @@ def log_end(
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
         f"[END] success={str(success).lower()} steps={steps} "
-        f"score={score:.3f} rewards={rewards_str}",
+        f"score={score:.4f} rewards={rewards_str}",
         flush=True,
     )
+
 
 
 # ---------------------------------------------------------------------------
@@ -444,12 +445,12 @@ def main() -> None:
     print(f"{'='*55}", flush=True)
     for r in results:
         print(
-            f"{r['task'].upper():8} | score={r['score']:.3f} "
+            f"{r['task'].upper():8} | score={r['score']:.4f} "
             f"| steps={r['steps']:2d} | {r['status']}",
             flush=True,
         )
     avg = sum(r["score"] for r in results) / len(results)
-    print(f"\nAverage Score: {avg:.3f}", flush=True)
+    print(f"\nAverage Score: {avg:.4f}", flush=True)
 
 
 if __name__ == "__main__":

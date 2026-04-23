@@ -13,6 +13,9 @@ MANDATORY ENV VARS:
   MODEL_NAME    — Model identifier
   HF_TOKEN      — API key (used as Bearer token)
 
+Supports 4 tasks: easy, medium, hard, crisis.
+Crisis task triggers a dramatic regulatory event banner at step 8.
+
 Author: Team AI Kalesh
 """
 
@@ -35,10 +38,10 @@ API_BASE_URL: str        = os.getenv("API_BASE_URL", "https://api.openai.com/v1"
 API_KEY:      str | None = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
 MODEL_NAME:   str        = os.getenv("MODEL_NAME", "gpt-4o-mini")
 
-BENCHMARK        = "openenv-workforce"
-MAX_STEPS        = 20          # per task, below env ceiling of 25
-TEMPERATURE      = 0.0         # deterministic
-MAX_TOKENS       = 100
+BENCHMARK         = "openenv-workforce"
+MAX_STEPS         = 25         # raised from 20 to fit crisis task (longer episodes)
+TEMPERATURE       = 0.0        # deterministic
+MAX_TOKENS        = 100
 SUCCESS_THRESHOLD = 0.5        # score >= this → success=true in [END]
 
 # ---------------------------------------------------------------------------
@@ -79,9 +82,33 @@ def log_end(
     )
 
 
+def log_regulatory_event_banner(event: dict) -> None:
+    """
+    DRAMATIC banner printed when the Crisis task's regulatory event fires.
+    This is the visual "wow moment" for judges watching a live inference run.
+    """
+    title = event.get("title", "Regulatory Event")
+    desc  = event.get("description", "")
+    print("", flush=True)
+    print("🚨" * 30, flush=True)
+    print("🚨" + " " * 56 + "🚨", flush=True)
+    print(f"🚨   REGULATORY EVENT FIRED: {title[:25]:<28}🚨", flush=True)
+    print("🚨" + " " * 56 + "🚨", flush=True)
+    print("🚨" * 30, flush=True)
+    # Wrap description into ~55-char lines for clean terminal output
+    wrapped = textwrap.wrap(desc, width=56)
+    for line in wrapped[:5]:  # cap at 5 lines
+        print(f"   {line}", flush=True)
+    print("", flush=True)
+    print("   ⚠️  The agent must now:", flush=True)
+    print("      1. Call acknowledge_regulatory_change", flush=True)
+    print("      2. Request and verify ict_permit (replaces visa)", flush=True)
+    print("      3. NEVER use the old visa document again", flush=True)
+    print("", flush=True)
+
 
 # ---------------------------------------------------------------------------
-# System prompt for the LLM agent
+# System prompt for the LLM agent — updated for crisis task
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = textwrap.dedent("""
@@ -93,17 +120,19 @@ Respond with ONLY a JSON object on a single line — no explanation, no markdown
 {"action_type": "<type>", "target": "<target>"}
 
 Valid action_types and targets:
-  request_document   → target = document name (passport/visa/employment_letter/work_permit)
-  verify_document    → target = document name (must request first)
-  approve_hr         → target = "" (no prerequisites)
-  approve_legal      → target = "" (ALL documents must be verified first)
-  approve_finance    → target = "" (Legal must approve first, conflicts resolved)
-  set_payroll        → target = "" or country name
-  set_tax_id         → target = "" or country name
-  set_shadow_payroll → target = "" (Singapore only)
-  set_pdpa           → target = "" (Singapore only)
-  resolve_conflict   → target = "" (hard task only)
-  finalize_case      → target = "" (only when all requirements met)
+  request_document              → target = document name
+                                    (passport/visa/employment_letter/work_permit/ict_permit)
+  verify_document               → target = document name (must request first)
+  approve_hr                    → target = "" (no prerequisites)
+  approve_legal                 → target = "" (ALL documents must be verified first)
+  approve_finance               → target = "" (Legal must approve first, conflicts resolved)
+  set_payroll                   → target = "" or country name
+  set_tax_id                    → target = "" or country name (Germany ONLY, never UAE)
+  set_shadow_payroll            → target = "" (Singapore only)
+  set_pdpa                      → target = "" (Singapore only)
+  resolve_conflict              → target = "" (hard task — for multi-country conflicts)
+  acknowledge_regulatory_change → target = "" (crisis task — when event fires)
+  finalize_case                 → target = "" (only when all requirements met)
 
 CRITICAL RULES:
 1. ALWAYS request_document before verify_document
@@ -111,12 +140,21 @@ CRITICAL RULES:
 3. Finance approves ONLY after Legal approves
 4. UAE has NO income tax — NEVER call set_tax_id for UAE
 5. Hard task: call resolve_conflict BEFORE approve_finance
-6. Only call finalize_case when available_actions shows it
+
+CRISIS TASK — REGULATORY EVENT HANDLING:
+6. If you see "REGULATORY ALERT" in the observation, the Blue Card visa
+   has been SUSPENDED. You MUST:
+   a. Call acknowledge_regulatory_change FIRST
+   b. Then request_document for "ict_permit" (the new required document)
+   c. Then verify_document for "ict_permit"
+   d. NEVER use the old visa document after the alert — that is a rule violation
+7. Always check "Available actions:" and pick from there when possible
+8. Only call finalize_case when it appears in available_actions
 """).strip()
 
 
 # ---------------------------------------------------------------------------
-# Prompt builder
+# Prompt builder — enhanced to surface regulatory events prominently
 # ---------------------------------------------------------------------------
 
 def build_prompt(obs: dict, step: int, history: List[str]) -> str:
@@ -155,6 +193,17 @@ def build_prompt(obs: dict, step: int, history: List[str]) -> str:
 
     if last_err:
         lines.append(f"Last error: {last_err}")
+
+    # Surface regulatory event PROMINENTLY so the LLM cannot miss it
+    if state.get("regulatory_event_fired") and not state.get("regulatory_event_acknowledged"):
+        ev = state.get("regulatory_event", {}) or {}
+        lines.append("")
+        lines.append("🚨 REGULATORY ALERT — ACTION REQUIRED 🚨")
+        lines.append(f"Event: {ev.get('title', 'Unknown event')}")
+        lines.append(f"Impact: {ev.get('description', '')[:200]}")
+        lines.append(f"Invalidated document: {ev.get('invalidates_document', 'visa')}")
+        lines.append(f"New required document: {ev.get('requires_new_document', 'ict_permit')}")
+        lines.append("YOU MUST call acknowledge_regulatory_change FIRST.")
 
     conflicts = state.get("conflicts", [])
     if conflicts:
@@ -265,6 +314,7 @@ def run_episode(task_name: str, client: OpenAI) -> dict:
     """
     Run one complete episode for the given task.
     Emits [START], [STEP]×n, [END] to stdout.
+    For the crisis task, prints a dramatic banner when the regulatory event fires.
 
     Returns summary dict for final table.
     """
@@ -277,6 +327,7 @@ def run_episode(task_name: str, client: OpenAI) -> dict:
     score:        float       = 0.0
     success:      bool        = False
     final_status: str         = "failed"
+    event_banner_shown:        bool = False   # only print banner once per episode
 
     log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
@@ -310,6 +361,16 @@ def run_episode(task_name: str, client: OpenAI) -> dict:
 
                 # Update obs for next iteration
                 obs = result.observation.model_dump()
+
+                # ── CRISIS TASK: print dramatic banner when event fires ──
+                if (
+                    task_name == "crisis"
+                    and not event_banner_shown
+                    and obs.get("state", {}).get("regulatory_event_fired", False)
+                ):
+                    ev = obs.get("state", {}).get("regulatory_event", {}) or {}
+                    log_regulatory_event_banner(ev)
+                    event_banner_shown = True
 
                 # Capture score if episode ended via finalize
                 if done and "final_score" in result.info:
@@ -346,7 +407,6 @@ def run_episode(task_name: str, client: OpenAI) -> dict:
         if score == 0.0 or final_status == "failed":
             try:
                 state_dict = env.state().model_dump()
-                # Build grader-compatible dict
                 score = grade(
                     task_name,
                     _flatten_state(state_dict),
@@ -377,6 +437,7 @@ def run_episode(task_name: str, client: OpenAI) -> dict:
         "steps":       steps_taken,
         "status":      final_status,
         "cumulative":  round(sum(rewards), 4),
+        "event_fired": event_banner_shown,   # useful flag for crisis results
     }
 
 
@@ -427,30 +488,47 @@ def _flatten_state(state_dict: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Main — runs ALL 4 tasks (easy, medium, hard, crisis)
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     results = []
-    for task_name in ["easy", "medium", "hard"]:
+    # ── UPDATED: now includes "crisis" ──
+    for task_name in ["easy", "medium", "hard", "crisis"]:
         print(f"\n{'='*55}", flush=True)
         result = run_episode(task_name, client)
         results.append(result)
 
-    # Final summary (plain text — won't interfere with [START]/[STEP]/[END] parsing)
+    # Final summary
     print(f"\n{'='*55}", flush=True)
-    print("BASELINE RESULTS", flush=True)
+    print("BASELINE RESULTS (4 tasks)", flush=True)
     print(f"{'='*55}", flush=True)
     for r in results:
+        crisis_flag = ""
+        if r["task"] == "crisis":
+            crisis_flag = " ⚡ event_fired=" + str(r.get("event_fired", False)).lower()
         print(
             f"{r['task'].upper():8} | score={r['score']:.4f} "
-            f"| steps={r['steps']:2d} | {r['status']}",
+            f"| steps={r['steps']:2d} | {r['status']}{crisis_flag}",
             flush=True,
         )
     avg = sum(r["score"] for r in results) / len(results)
-    print(f"\nAverage Score: {avg:.4f}", flush=True)
+    print(f"\nAverage Score (4 tasks): {avg:.4f}", flush=True)
+
+    # Save to JSON for later use in blog / pitch deck
+    try:
+        with open("inference_results.json", "w") as f:
+            json.dump({
+                "model": MODEL_NAME,
+                "benchmark": BENCHMARK,
+                "results": results,
+                "average_score": round(avg, 4),
+            }, f, indent=2)
+        print("💾 Results saved to inference_results.json", flush=True)
+    except Exception as exc:
+        print(f"[DEBUG] Could not save JSON: {exc}", flush=True)
 
 
 if __name__ == "__main__":

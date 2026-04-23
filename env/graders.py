@@ -16,6 +16,7 @@ from graders.graders import (
     grade_easy,
     grade_medium,
     grade_hard,
+    grade_crisis,      # ← ADDED for crisis task support
     grade_all,
     explain,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "grade_easy",
     "grade_medium",
     "grade_hard",
+    "grade_crisis",    # ← ADDED
     "grade_all",
     "explain",
 ]

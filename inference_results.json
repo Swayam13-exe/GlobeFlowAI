@@ -1,0 +1,39 @@
+{
+  "model": "gpt-4o-mini",
+  "benchmark": "openenv-workforce",
+  "results": [
+    {
+      "task": "easy",
+      "score": 0.75,
+      "steps": 15,
+      "status": "success",
+      "cumulative": 5.35,
+      "event_fired": false
+    },
+    {
+      "task": "medium",
+      "score": 0.7499,
+      "steps": 13,
+      "status": "success",
+      "cumulative": 5.15,
+      "event_fired": false
+    },
+    {
+      "task": "hard",
+      "score": 0.5999,
+      "steps": 16,
+      "status": "success",
+      "cumulative": 5.7,
+      "event_fired": false
+    },
+    {
+      "task": "crisis",
+      "score": 0.0001,
+      "steps": 25,
+      "status": "in_progress",
+      "cumulative": 0.3,
+      "event_fired": true
+    }
+  ],
+  "average_score": 0.525
+}

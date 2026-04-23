@@ -18,6 +18,13 @@ Task summary:
           Required: 4 docs + HR + Legal + Finance + tax_id(DE only) + payroll(both)
           KEY TRAP: UAE has no income tax — set_tax_id:UAE = rule_violation
 
+  crisis: India → Germany, Manager, 35 days
+          Required: 4 docs (passport, employment_letter, work_permit, ict_permit)
+                    + HR + Legal + tax_id + payroll
+          KEY MECHANIC: At step 8 a regulatory event fires — Blue Card visa
+          suspended. Agent must acknowledge and switch to ict_permit.
+          Using old visa after event = rule_violation penalty.
+
 State dict schema matches WorkforceState in env/models.py exactly.
 
 Author: Team AI Kalesh
@@ -41,7 +48,7 @@ TASKS: dict[str, dict] = {
     # =========================================================================
     "easy": {
         "case_id":   "CASE-001-EASY",
-        "task_name": "easy",                          # FIX 6: added task_name
+        "task_name": "easy",
         "employee": {
             "role":           "Engineer",
             "has_dependents": False,
@@ -76,14 +83,18 @@ TASKS: dict[str, dict] = {
             "pdpa":           False,
             "shadow_payroll": False,
         },
-        "conflicts": [],                              # FIX 4: always present
+        "conflicts": [],
         "deadline_days":      20,
         "previous_actions":   [],
         "progress":           0.0,
         "status":             "in_progress",
-        # FIX 1: required lists — used by validators, graders, reward
         "required_departments": ["HR"],
         "required_compliance":  ["tax_id", "payroll"],
+        # Crisis fields — inactive for this task
+        "regulatory_event_fired":        False,
+        "regulatory_event_acknowledged": False,
+        "regulatory_event_step":         9999,
+        "regulatory_event":              None,
     },
 
     # =========================================================================
@@ -94,15 +105,10 @@ TASKS: dict[str, dict] = {
     #   request_document x3 → verify_document x3 → approve_hr →
     #   approve_legal → set_payroll → set_pdpa → set_shadow_payroll →
     #   finalize_case
-    #
-    # Note: degree_certificate NOT included in docs — agent only sees the
-    # 3 documents relevant to Singapore. No invalid-doc trap.
-    # Singapore does NOT require tax_id (no income tax for foreigners).
-    # Finance NOT required for Singapore medium task.
     # =========================================================================
     "medium": {
         "case_id":   "CASE-002-MEDIUM",
-        "task_name": "medium",                        # FIX 6
+        "task_name": "medium",
         "employee": {
             "role":           "Manager",
             "has_dependents": True,
@@ -121,9 +127,6 @@ TASKS: dict[str, dict] = {
                 "status":   "missing",
                 "is_valid": True,
             },
-            # FIX 3: degree_certificate removed — it's not required for
-            # Singapore and having is_valid=False permanently blocks Legal.
-            # Trap is now logical (Singapore rules) not a broken dead-end.
         },
         "departments": {
             "HR":      False,
@@ -136,14 +139,18 @@ TASKS: dict[str, dict] = {
             "pdpa":           False,
             "shadow_payroll": False,
         },
-        "conflicts": [],                              # FIX 4
+        "conflicts": [],
         "deadline_days":      25,
         "previous_actions":   [],
         "progress":           0.0,
         "status":             "in_progress",
-        # FIX 1 + FIX 5: Singapore medium — HR + Legal, no Finance
         "required_departments": ["HR", "Legal"],
         "required_compliance":  ["payroll", "pdpa", "shadow_payroll"],
+        # Crisis fields — inactive for this task
+        "regulatory_event_fired":        False,
+        "regulatory_event_acknowledged": False,
+        "regulatory_event_step":         9999,
+        "regulatory_event":              None,
     },
 
     # =========================================================================
@@ -157,18 +164,11 @@ TASKS: dict[str, dict] = {
     #
     # KEY TRAPS:
     #   1. UAE has NO income tax → set_tax_id:UAE = -0.3 rule_violation
-    #      The conflict record makes this explicit — agent must resolve it.
     #   2. Finance requires Legal + all conflicts resolved
-    #   3. Tight deadline (30 days) for ~16 required steps
-    #   4. Both countries' docs must be verified before Legal
-    #
-    # Documents: shared docs cover both countries (passport, visa,
-    # employment_letter, work_permit). UAE uses residence_permit instead of
-    # work_permit but for simplicity this task uses a combined doc set.
     # =========================================================================
     "hard": {
         "case_id":   "CASE-003-HARD",
-        "task_name": "hard",                          # FIX 6
+        "task_name": "hard",
         "employee": {
             "role":           "Director",
             "has_dependents": True,
@@ -203,8 +203,6 @@ TASKS: dict[str, dict] = {
             "pdpa":           False,
             "shadow_payroll": False,
         },
-        # FIX 4: conflicts key — the Germany+UAE tax conflict
-        # Agent must call resolve_conflict before Finance can approve
         "conflicts": [
             {
                 "countries": ["Germany", "UAE"],
@@ -221,15 +219,111 @@ TASKS: dict[str, dict] = {
         "previous_actions":   [],
         "progress":           0.0,
         "status":             "in_progress",
-        # FIX 1: all three departments + tax_id + payroll required
         "required_departments": ["HR", "Legal", "Finance"],
         "required_compliance":  ["tax_id", "payroll"],
+        # Crisis fields — inactive for this task
+        "regulatory_event_fired":        False,
+        "regulatory_event_acknowledged": False,
+        "regulatory_event_step":         9999,
+        "regulatory_event":              None,
+    },
+
+    # =========================================================================
+    # TASK 4 — CRISIS
+    # India → Germany, Manager, no dependents — mid-episode regulatory change
+    #
+    # Phase 1 (steps 1-7): Normal Germany relocation flow.
+    #   request/verify: passport, employment_letter, work_permit
+    #   approve_hr
+    #
+    # Phase 2 (auto-triggered at step 8):
+    #   Regulatory event fires:
+    #   "Germany has suspended the Blue Card visa — switch to ICT Permit"
+    #
+    #   The agent MUST:
+    #     1. Call acknowledge_regulatory_change
+    #     2. Call request_document:ict_permit  (new doc injected into state)
+    #     3. Call verify_document:ict_permit
+    #     4. NOT use old "visa" doc (= rule_violation -0.3)
+    #
+    # Phase 3 (steps ~13-20): Resume normal flow.
+    #   approve_legal → set_tax_id → set_payroll → finalize_case
+    #
+    # Score ceiling: 0.89
+    # Expected range: 0.40 – 0.90
+    # =========================================================================
+    "crisis": {
+        "case_id":   "CASE-004-CRISIS",
+        "task_name": "crisis",
+        "employee": {
+            "role":           "Manager",
+            "has_dependents": False,
+        },
+        "countries": ["Germany"],
+        "documents": {
+            "passport": {
+                "status":   "missing",
+                "is_valid": True,
+            },
+            "visa": {
+                "status":   "missing",
+                "is_valid": True,
+            },
+            "employment_letter": {
+                "status":   "missing",
+                "is_valid": True,
+            },
+            "work_permit": {
+                "status":   "missing",
+                "is_valid": True,
+            },
+            # NOTE: "ict_permit" is NOT here at episode start.
+            # It is injected dynamically when the regulatory event fires at step 8.
+        },
+        "departments": {
+            "HR":      False,
+            "Legal":   False,
+            "Finance": False,
+        },
+        "compliance": {
+            "tax_id":         False,
+            "payroll":        False,
+            "pdpa":           False,
+            "shadow_payroll": False,
+        },
+        "conflicts": [],
+        "deadline_days":      35,
+        "previous_actions":   [],
+        "progress":           0.0,
+        "status":             "in_progress",
+        "required_departments": ["HR", "Legal"],
+        "required_compliance":  ["tax_id", "payroll"],
+
+        # ── Crisis-specific fields ──────────────────────────────────────────
+        "regulatory_event_fired":        False,
+        "regulatory_event_acknowledged": False,
+        "regulatory_event_step":         8,
+        "regulatory_event": {
+            "id":          "DE-VISA-SUSPENSION-2024",
+            "title":       "Germany Blue Card Visa Suspension",
+            "description": (
+                "REGULATORY ALERT: Germany has suspended the Blue Card visa "
+                "programme effective immediately. All pending Blue Card visas "
+                "are invalidated. Affected employees must switch to the "
+                "ICT (Intra-Company Transfer) Permit. "
+                "Action required: acknowledge this change and request an "
+                "ict_permit document to replace the invalidated visa."
+            ),
+            "invalidates_document":      "visa",
+            "requires_new_document":     "ict_permit",
+            "penalty_if_used_after_event": -0.3,
+        },
     },
 }
 
 
 # ---------------------------------------------------------------------------
-# Task metadata — used by ResetResult.task_info and TASK_INFO lookups
+# Task metadata — used by /tasks endpoint and TASK_INFO lookups
 # ---------------------------------------------------------------------------
 
 TASK_INFO: dict[str, dict] = {
@@ -243,7 +337,6 @@ TASK_INFO: dict[str, dict] = {
         "countries":            ["Germany"],
         "max_steps":            25,
         "expected_score_range": (0.70, 1.00),
-        # FIX 2: consistent with required_departments in task dict
         "departments_required": ["HR"],
         "compliance_required":  ["tax_id", "payroll"],
         "key_rules": [
@@ -262,7 +355,6 @@ TASK_INFO: dict[str, dict] = {
         "countries":            ["Singapore"],
         "max_steps":            25,
         "expected_score_range": (0.40, 0.80),
-        # FIX 5: HR + Legal only for Singapore medium
         "departments_required": ["HR", "Legal"],
         "compliance_required":  ["payroll", "pdpa", "shadow_payroll"],
         "key_rules": [
@@ -290,6 +382,29 @@ TASK_INFO: dict[str, dict] = {
             "Both countries require payroll configuration",
             "Finance requires Legal approval AND all conflicts resolved",
             "resolve_conflict must be called before approve_finance",
+        ],
+    },
+    "crisis": {
+        "name":        "crisis",
+        "description": (
+            "Relocate a Manager from India to Germany — but mid-episode "
+            "a regulatory alert fires: Germany suspends the Blue Card visa. "
+            "The agent must detect the change, acknowledge it, swap to ICT Permit, "
+            "and complete the relocation. Tests long-horizon planning + adaptation."
+        ),
+        "countries":            ["Germany"],
+        "max_steps":            35,
+        "expected_score_range": (0.40, 0.90),
+        "departments_required": ["HR", "Legal"],
+        "compliance_required":  ["tax_id", "payroll"],
+        "key_rules": [
+            "Regulatory event fires at step 8 — Blue Card visa suspended",
+            "Agent must call acknowledge_regulatory_change to clear the event",
+            "Old 'visa' document becomes invalid after the event fires",
+            "New 'ict_permit' document must be requested and verified",
+            "Using visa after event fires = -0.3 rule_violation penalty",
+            "Germany requires tax_id and payroll",
+            "HR + Legal approval required",
         ],
     },
 }

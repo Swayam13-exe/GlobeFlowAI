@@ -42,7 +42,7 @@ from env.tasks import TASKS
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_STEPS: int = 25
+MAX_STEPS: int = 35   # raised from 25 to accommodate the crisis task (35 days)
 
 VALID_ACTION_TYPES: set[str] = {
     "request_document",
@@ -54,11 +54,11 @@ VALID_ACTION_TYPES: set[str] = {
     "set_tax_id",
     "set_shadow_payroll",
     "set_pdpa",
-    "resolve_conflict",     # FIX 4: added for hard task
+    "resolve_conflict",
+    "acknowledge_regulatory_change",   # crisis task
     "finalize_case",
 }
 
-# FIX 3: All documents used across ALL three tasks
 VALID_DOCUMENTS: set[str] = {
     "passport",
     "visa",
@@ -68,6 +68,7 @@ VALID_DOCUMENTS: set[str] = {
     "employment_pass",      # Singapore
     "residence_permit",     # UAE
     "tax_form",
+    "ict_permit",           # Germany crisis task — injected at step 8
 }
 
 VALID_DEPARTMENTS: set[str] = {"HR", "Legal", "Finance"}
@@ -82,6 +83,7 @@ NO_TARGET_ACTIONS: set[str] = {
     "set_shadow_payroll",
     "set_pdpa",
     "resolve_conflict",
+    "acknowledge_regulatory_change",
     "finalize_case",
 }
 
@@ -120,7 +122,7 @@ class WorkforceEnv:
         Start a new episode for the given task.
 
         Args:
-            task_name: One of "easy", "medium", "hard".
+            task_name: One of "easy", "medium", "hard", "crisis".
 
         Returns:
             Observation with the initial state and available actions.
@@ -139,15 +141,23 @@ class WorkforceEnv:
         self._last_action_error = None
         self._session_id = str(uuid.uuid4())
 
-        # Ensure conflicts key exists (empty list for easy/medium)
+        # Ensure required keys exist
         if "conflicts" not in self._state:
             self._state["conflicts"] = []
-
-        # Ensure required lists exist
         if "required_departments" not in self._state:
             self._state["required_departments"] = []
         if "required_compliance" not in self._state:
             self._state["required_compliance"] = []
+
+        # Ensure crisis fields exist for non-crisis tasks too (safe defaults)
+        if "regulatory_event_fired" not in self._state:
+            self._state["regulatory_event_fired"] = False
+        if "regulatory_event_acknowledged" not in self._state:
+            self._state["regulatory_event_acknowledged"] = False
+        if "regulatory_event_step" not in self._state:
+            self._state["regulatory_event_step"] = 9999
+        if "regulatory_event" not in self._state:
+            self._state["regulatory_event"] = None
 
         return self._build_observation()
 
@@ -171,6 +181,9 @@ class WorkforceEnv:
                 info={"error": "episode_already_done"},
             )
 
+        # ── Crisis: fire regulatory event if step threshold reached ────────
+        self._maybe_fire_regulatory_event()
+
         prev_progress = self._state.get("progress", 0.0)
 
         # ── Validate action format ──────────────────────────────────────────
@@ -180,6 +193,28 @@ class WorkforceEnv:
                 result="invalid_action",
                 error=format_error,
                 reward_key="invalid_action",
+            )
+
+        # ── Crisis: check for invalidated document usage ───────────────────
+        crisis_violation = self._crisis_rule_check(action)
+        if crisis_violation:
+            result, error, extra_info = crisis_violation
+            reward_val = -0.3
+            self._state["previous_actions"].append(action.to_key())
+            self._state["progress"] = self._compute_progress()
+            self._steps_taken += 1
+            self._state["deadline_days"] = max(0, self._state["deadline_days"] - 1)
+            self._cumulative_reward = max(
+                0.0, min(1.0, self._cumulative_reward + reward_val)
+            )
+            self._last_action_result = result
+            self._last_action_error = error
+            self._check_terminal_conditions()
+            return StepResult(
+                observation=self._build_observation(),
+                reward=max(-1.0, min(1.0, reward_val)),
+                done=self._done,
+                info={"result": result, "error": error, **(extra_info or {})},
             )
 
         # ── Check for repeated action ───────────────────────────────────────
@@ -222,7 +257,6 @@ class WorkforceEnv:
         self._last_action_error = error
 
         # ── Check deadline / step-limit termination ─────────────────────────
-        # finalize_case sets self._done inside _handle_finalize_case.
         if not self._done:
             self._check_terminal_conditions()
 
@@ -248,10 +282,7 @@ class WorkforceEnv:
 
     def state(self) -> WorkforceState:
         """Return the current full environment state as a typed Pydantic model."""
-        ws = self._dict_to_model()
-        # Attach episode metadata into previous_actions as a convention
-        # (WorkforceState has no step/reward fields — those live in environment)
-        return ws
+        return self._dict_to_model()
 
     # -----------------------------------------------------------------------
     # Penalty helper (for invalid / repeated actions)
@@ -289,17 +320,18 @@ class WorkforceEnv:
     ) -> tuple[str, str | None, dict[str, Any]]:
         """Route action to the correct handler."""
         handlers = {
-            "request_document":   self._handle_request_document,
-            "verify_document":    self._handle_verify_document,
-            "approve_hr":         self._handle_approve_department,
-            "approve_legal":      self._handle_approve_department,
-            "approve_finance":    self._handle_approve_department,
-            "set_payroll":        self._handle_set_compliance,
-            "set_tax_id":         self._handle_set_compliance,
-            "set_shadow_payroll": self._handle_set_compliance,
-            "set_pdpa":           self._handle_set_compliance,
-            "resolve_conflict":   self._handle_resolve_conflict,   # FIX 4
-            "finalize_case":      self._handle_finalize_case,
+            "request_document":               self._handle_request_document,
+            "verify_document":                self._handle_verify_document,
+            "approve_hr":                     self._handle_approve_department,
+            "approve_legal":                  self._handle_approve_department,
+            "approve_finance":                self._handle_approve_department,
+            "set_payroll":                    self._handle_set_compliance,
+            "set_tax_id":                     self._handle_set_compliance,
+            "set_shadow_payroll":             self._handle_set_compliance,
+            "set_pdpa":                       self._handle_set_compliance,
+            "resolve_conflict":               self._handle_resolve_conflict,
+            "acknowledge_regulatory_change":  self._handle_acknowledge_regulatory_change,
+            "finalize_case":                  self._handle_finalize_case,
         }
         handler = handlers.get(action.action_type)
         if not handler:
@@ -332,7 +364,6 @@ class WorkforceEnv:
         if not doc:
             return "invalid_action", f"Document '{doc_name}' not in this case", {}
 
-        # Must be submitted before it can be verified
         status = doc.get("status", "missing")
         if status == "missing":
             return (
@@ -387,11 +418,9 @@ class WorkforceEnv:
     ) -> tuple[str, str | None, dict]:
         """
         Unified handler for set_payroll, set_tax_id, set_shadow_payroll, set_pdpa.
-        FIX 6: accepts empty target — infers country from case if needed.
         """
         action_type = action.action_type
 
-        # Map action → compliance field
         compliance_field_map = {
             "set_payroll":        "payroll",
             "set_tax_id":         "tax_id",
@@ -400,12 +429,9 @@ class WorkforceEnv:
         }
         field = compliance_field_map[action_type]
 
-        # Already set?
         if self._state["compliance"][field]:
             return "wrong_action", f"{field} already configured", {}
 
-        # Validate using rules
-        # FIX 6: use first relevant country if target is empty
         country = action.target or (
             self._state["countries"][0] if self._state["countries"] else ""
         )
@@ -419,17 +445,13 @@ class WorkforceEnv:
     def _handle_resolve_conflict(
         self, action: Action
     ) -> tuple[str, str | None, dict]:
-        """
-        FIX 4: Handle resolve_conflict for hard task.
-        Resolves the first unresolved conflict in the list.
-        """
+        """Handle resolve_conflict for hard task."""
         conflicts = self._state.get("conflicts", [])
         unresolved = [c for c in conflicts if not c.get("resolved", False)]
 
         if not unresolved:
             return "wrong_action", "No unresolved conflicts in this case", {}
 
-        # Resolve the first unresolved conflict
         for c in self._state["conflicts"]:
             if not c.get("resolved", False):
                 c["resolved"] = True
@@ -440,17 +462,153 @@ class WorkforceEnv:
 
         return "wrong_action", "No conflicts to resolve", {}
 
+    # -----------------------------------------------------------------------
+    # CRISIS TASK — Regulatory event injection + acknowledgement handler
+    # -----------------------------------------------------------------------
+
+    def _maybe_fire_regulatory_event(self) -> None:
+        """
+        Called at the START of each step() before action dispatch.
+        Fires the crisis task's regulatory event when step threshold is reached.
+        Mutates state to inject ict_permit and invalidate the old visa.
+
+        Safe no-op for all non-crisis tasks.
+        """
+        if self._task_name != "crisis":
+            return
+
+        event_fired  = self._state.get("regulatory_event_fired", False)
+        event_step   = self._state.get("regulatory_event_step", 8)
+
+        # Only fire once, at the designated step.
+        # _steps_taken is 0-indexed and increments AFTER each step completes,
+        # so at the start of the Nth step, _steps_taken == N-1.
+        # To fire "at step 8" (the 8th action), we fire when _steps_taken == 7.
+        if event_fired or self._steps_taken < event_step - 1:
+            return
+
+        # ── Fire the event ──────────────────────────────────────────────────
+        self._state["regulatory_event_fired"] = True
+        event = self._state.get("regulatory_event", {}) or {}
+
+        # 1. Invalidate the old visa document
+        invalidated_doc = event.get("invalidates_document", "visa")
+        if invalidated_doc in self._state["documents"]:
+            self._state["documents"][invalidated_doc]["is_valid"] = False
+            # If already verified, revert to submitted so verify_document rejects it
+            if self._state["documents"][invalidated_doc]["status"] == "verified":
+                self._state["documents"][invalidated_doc]["status"] = "submitted"
+
+        # 2. Inject the new required document (ict_permit) into state
+        new_doc = event.get("requires_new_document", "ict_permit")
+        if new_doc not in self._state["documents"]:
+            self._state["documents"][new_doc] = {
+                "status":   "missing",
+                "is_valid": True,
+            }
+
+        # 3. Log event as a system marker in action history
+        event_id = event.get("id", "REGULATORY_EVENT")
+        self._state["previous_actions"].append(f"[SYSTEM_EVENT:{event_id}]")
+
+    def _handle_acknowledge_regulatory_change(
+        self, action: Action
+    ) -> tuple[str, str | None, dict]:
+        """
+        Handler for acknowledge_regulatory_change.
+
+        Only valid in crisis task after the regulatory event has fired.
+        """
+        if self._task_name != "crisis":
+            return (
+                "wrong_action",
+                "acknowledge_regulatory_change is only valid in the 'crisis' task",
+                {},
+            )
+
+        event_fired = self._state.get("regulatory_event_fired", False)
+        if not event_fired:
+            return (
+                "wrong_action",
+                (
+                    "No regulatory event has fired yet. "
+                    "Continue the normal relocation workflow."
+                ),
+                {},
+            )
+
+        already_acknowledged = self._state.get("regulatory_event_acknowledged", False)
+        if already_acknowledged:
+            return (
+                "wrong_action",
+                "Regulatory change already acknowledged.",
+                {},
+            )
+
+        # ── Acknowledge ─────────────────────────────────────────────────────
+        self._state["regulatory_event_acknowledged"] = True
+        event = self._state.get("regulatory_event", {}) or {}
+
+        return (
+            "success",
+            None,
+            {
+                "detail": (
+                    f"Regulatory change acknowledged: {event.get('title', 'Unknown event')}. "
+                    f"Old visa document invalidated. "
+                    f"New document required: {event.get('requires_new_document', 'ict_permit')}. "
+                    f"Request and verify 'ict_permit' to continue."
+                ),
+                "milestone": "regulatory_change_acknowledged",
+                "new_document_required": event.get("requires_new_document", "ict_permit"),
+            },
+        )
+
+    def _crisis_rule_check(
+        self, action: Action
+    ) -> tuple[str, str | None, dict] | None:
+        """
+        Called inside step() BEFORE dispatching any action.
+        Returns a rule_violation result if the agent tries to use the
+        invalidated visa document after the regulatory event has fired.
+
+        Returns None if no violation — normal dispatch continues.
+        """
+        if self._task_name != "crisis":
+            return None
+
+        event_fired = self._state.get("regulatory_event_fired", False)
+        if not event_fired:
+            return None
+
+        event = self._state.get("regulatory_event", {}) or {}
+        invalidated_doc = event.get("invalidates_document", "visa")
+
+        # Penalise any attempt to request or verify the invalidated document
+        if action.action_type in ("request_document", "verify_document"):
+            if action.target == invalidated_doc:
+                return (
+                    "rule_violation",
+                    (
+                        f"Cannot use '{invalidated_doc}' after the regulatory event. "
+                        f"The Blue Card visa has been suspended. "
+                        f"Acknowledge the change and use 'ict_permit' instead."
+                    ),
+                    {"penalty": event.get("penalty_if_used_after_event", -0.3)},
+                )
+        return None
+
+    # -----------------------------------------------------------------------
+    # Finalize handler
+    # -----------------------------------------------------------------------
+
     def _handle_finalize_case(
         self, action: Action
     ) -> tuple[str, str | None, dict]:
         """
         Attempt to close the relocation case.
-
-        FIX 1: Accept both target="" and target="all".
-        FIX 7: Always set status="success" when blockers pass —
-                do NOT gate on expected_score_range (that's documentation only).
+        Accepts both target="" and target="all".
         """
-        # FIX 1: accept empty target OR "all"
         if action.target not in ("", "all"):
             return (
                 "invalid_action",
@@ -458,7 +616,6 @@ class WorkforceEnv:
                 {},
             )
 
-        # Blocker check
         blockers = self._get_blockers()
         if blockers:
             return (
@@ -467,11 +624,9 @@ class WorkforceEnv:
                 {"blockers": blockers},
             )
 
-        # Run grader for the score
         from env.graders import grade
         final_score: float = grade(self._task_name, self._state)
 
-        # FIX 7: success is determined by passing blockers, not score range
         self._state["status"] = "success"
         self._done = True
 
@@ -494,7 +649,6 @@ class WorkforceEnv:
                 f"Valid: {sorted(VALID_ACTION_TYPES)}"
             )
 
-        # FIX 2: document actions need a non-empty target from VALID_DOCUMENTS
         if action.action_type in {"request_document", "verify_document"}:
             if not action.target:
                 return "Document actions require a non-empty target"
@@ -504,7 +658,6 @@ class WorkforceEnv:
                     f"Valid: {sorted(VALID_DOCUMENTS)}"
                 )
 
-        # FIX 2: all other actions allow empty target — no validation needed
         return None
 
     # -----------------------------------------------------------------------
@@ -513,9 +666,9 @@ class WorkforceEnv:
 
     def _compute_progress(self) -> float:
         """Compute weighted progress fraction [0.0, 1.0]."""
-        docs  = self._state.get("documents", {})
-        depts = self._state.get("departments", {})
-        comp  = self._state.get("compliance", {})
+        docs      = self._state.get("documents", {})
+        depts     = self._state.get("departments", {})
+        comp      = self._state.get("compliance", {})
         conflicts = self._state.get("conflicts", [])
         req_depts = self._state.get("required_departments", list(depts.keys()))
         req_comp  = self._state.get("required_compliance", [])
@@ -552,11 +705,24 @@ class WorkforceEnv:
         else:
             conflict_prog = 1.0
 
+        # Crisis: regulatory event acknowledgement adds to progress
+        crisis_prog = 1.0
+        if self._task_name == "crisis":
+            event_fired = self._state.get("regulatory_event_fired", False)
+            event_ack   = self._state.get("regulatory_event_acknowledged", False)
+            if event_fired and not event_ack:
+                crisis_prog = 0.5
+            elif not event_fired:
+                crisis_prog = 1.0  # hasn't fired yet — not blocking
+            else:
+                crisis_prog = 1.0  # fired and acked
+
         total = (
-            0.40 * doc_prog
-            + 0.35 * dept_prog
+            0.38 * doc_prog
+            + 0.32 * dept_prog
             + 0.15 * comp_prog
-            + 0.10 * conflict_prog
+            + 0.08 * conflict_prog
+            + 0.07 * crisis_prog
         )
         return round(min(max(total, 0.0), 1.0), 4)
 
@@ -589,6 +755,15 @@ class WorkforceEnv:
         unresolved = [c["rule"] for c in conflicts if not c.get("resolved", False)]
         if unresolved:
             blockers.append(f"Unresolved conflicts: {unresolved}")
+
+        # Crisis task: block finalization until regulatory event is acknowledged
+        if self._task_name == "crisis":
+            event_fired = self._state.get("regulatory_event_fired", False)
+            event_ack   = self._state.get("regulatory_event_acknowledged", False)
+            if event_fired and not event_ack:
+                blockers.append(
+                    "Regulatory event unacknowledged: call acknowledge_regulatory_change first"
+                )
 
         return blockers
 
@@ -633,6 +808,14 @@ class WorkforceEnv:
         comp      = self._state.get("compliance", {})
         countries = self._state.get("countries", [])
         conflicts = self._state.get("conflicts", [])
+
+        # Crisis task: if event fired and unacknowledged, surface it first
+        if self._task_name == "crisis":
+            event_fired = self._state.get("regulatory_event_fired", False)
+            event_ack   = self._state.get("regulatory_event_acknowledged", False)
+            if event_fired and not event_ack:
+                available.insert(0, "acknowledge_regulatory_change")
+                # Don't return here — still show other possible actions
 
         # Document actions
         for doc_name, doc in docs.items():
@@ -684,7 +867,6 @@ class WorkforceEnv:
         """Convert internal state dict to a typed WorkforceState Pydantic model."""
         s = self._state
         if not s:
-            # Return minimal state if reset() hasn't been called yet
             return WorkforceState(
                 case_id="none",
                 task_name="easy",
@@ -694,7 +876,7 @@ class WorkforceEnv:
 
         return WorkforceState(
             case_id=s["case_id"],
-            task_name=s.get("task_name", self._task_name),   # FIX 5
+            task_name=s.get("task_name", self._task_name),
             employee=EmployeeRecord(
                 role=s["employee"]["role"],
                 has_dependents=s["employee"]["has_dependents"],
@@ -718,7 +900,7 @@ class WorkforceEnv:
                 pdpa=s["compliance"]["pdpa"],
                 shadow_payroll=s["compliance"]["shadow_payroll"],
             ),
-            conflicts=[                                        # FIX 5
+            conflicts=[
                 ConflictRecord(
                     countries=c["countries"],
                     rule=c["rule"],
@@ -730,6 +912,11 @@ class WorkforceEnv:
             previous_actions=s["previous_actions"],
             progress=s.get("progress", 0.0),
             status=s["status"],
-            required_departments=s.get("required_departments", []),  # FIX 5
-            required_compliance=s.get("required_compliance", []),     # FIX 5
+            required_departments=s.get("required_departments", []),
+            required_compliance=s.get("required_compliance", []),
+            # Crisis fields
+            regulatory_event_fired=s.get("regulatory_event_fired", False),
+            regulatory_event_acknowledged=s.get("regulatory_event_acknowledged", False),
+            regulatory_event=s.get("regulatory_event", None),
+            regulatory_event_step=s.get("regulatory_event_step", 9999),
         )

@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 DocumentStatus = Literal["missing", "submitted", "verified", "rejected"]
 EpisodeStatus  = Literal["in_progress", "success", "failed"]
-TaskName       = Literal["easy", "medium", "hard"]
+TaskName       = Literal["easy", "medium", "hard", "crisis"]   # ← crisis added
 CountryName    = Literal["Germany", "Singapore", "UAE"]
 RoleName       = Literal["Engineer", "Manager", "Director", "Analyst"]
 DepartmentName = Literal["HR", "Legal", "Finance"]
@@ -48,11 +48,11 @@ ActionType = Literal[
     "set_tax_id",
     "set_shadow_payroll",
     "set_pdpa",
-    "resolve_conflict",   # ← ADDED: required for hard task
+    "resolve_conflict",
+    "acknowledge_regulatory_change",   # ← crisis task action
     "finalize_case",
 ]
 
-# FIX 1: Expanded DocumentName to include ALL documents used across tasks
 DocumentName = Literal[
     "passport",
     "visa",
@@ -62,6 +62,7 @@ DocumentName = Literal[
     "employment_pass",      # Singapore
     "residence_permit",     # UAE
     "tax_form",
+    "ict_permit",           # Germany crisis task — replaces visa after event
 ]
 
 
@@ -133,10 +134,6 @@ class DepartmentStatus(BaseModel):
     Legal:   bool = Field(default=False, description="Legal department approval")
     Finance: bool = Field(default=False, description="Finance department approval")
 
-    # FIX 2: Removed model_validator that blocked Finance=True, Legal=False
-    # This constraint is enforced at step() time in validators.py.
-    # Having it here caused issues when loading state snapshots in tests.
-
     def approved_count(self) -> int:
         return sum([self.HR, self.Legal, self.Finance])
 
@@ -202,6 +199,12 @@ class WorkforceState(BaseModel):
     required_departments: list[str] = Field(default_factory=list, description="Departments required for this task")
     required_compliance:  list[str] = Field(default_factory=list, description="Compliance items required for this task")
 
+    # ── Crisis task fields (default False/None — ignored for easy/medium/hard) ─
+    regulatory_event_fired:        bool       = Field(default=False, description="True after event fires at step N")
+    regulatory_event_acknowledged: bool       = Field(default=False, description="True after agent acknowledges")
+    regulatory_event:              dict | None = Field(default=None,  description="Event payload (crisis only)")
+    regulatory_event_step:         int        = Field(default=9999,  description="Step at which event fires")
+
     @field_validator("countries")
     @classmethod
     def countries_must_be_valid(cls, v: list[str]) -> list[str]:
@@ -255,17 +258,18 @@ class Action(BaseModel):
     One agent action submitted to step().
 
     Valid action_type + target combinations:
-        request_document    → document name (e.g. "passport")
-        verify_document     → document name
-        approve_hr          → "" or "HR"
-        approve_legal       → "" or "Legal"
-        approve_finance     → "" or "Finance"
-        set_payroll         → "" or country name
-        set_tax_id          → "" or country name
-        set_shadow_payroll  → "" or "Singapore"
-        set_pdpa            → "" or "Singapore"
-        resolve_conflict    → "" or conflict description
-        finalize_case       → ""
+        request_document              → document name (e.g. "passport")
+        verify_document               → document name
+        approve_hr                    → "" or "HR"
+        approve_legal                 → "" or "Legal"
+        approve_finance               → "" or "Finance"
+        set_payroll                   → "" or country name
+        set_tax_id                    → "" or country name
+        set_shadow_payroll            → "" or "Singapore"
+        set_pdpa                      → "" or "Singapore"
+        resolve_conflict              → "" or conflict description
+        acknowledge_regulatory_change → "" (crisis task only)
+        finalize_case                 → ""
     """
 
     action_type: str = Field(
@@ -273,8 +277,6 @@ class Action(BaseModel):
         description="The type of action to perform",
         examples=["verify_document", "approve_hr", "finalize_case"],
     )
-    # FIX 3: target defaults to "" and allows empty string
-    # Actions like approve_hr, finalize_case have no meaningful target
     target: str = Field(
         default="",
         description="Subject of the action. Empty string for department/compliance actions.",
@@ -291,7 +293,6 @@ class Action(BaseModel):
     @field_validator("target")
     @classmethod
     def target_strip(cls, v: str) -> str:
-        # FIX 3 cont: strip whitespace but allow empty string
         return v.strip() if v else ""
 
     def to_key(self) -> str:

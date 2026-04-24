@@ -3,22 +3,37 @@ graders/graders.py
 ==================
 Deterministic graders for all openenv-workforce tasks.
 
-SCORING DESIGN:
-  Each grader computes a score in (0.0, 1.0) from state completeness.
-  Scores are based ONLY on what the task actually requires —
-  consistent with required_departments and required_compliance in tasks.py.
+SCORING DESIGN — NO CEILINGS
+────────────────────────────
+Scores are derived purely from weighted requirement completion.
+No artificial per-task ceilings. Difficulty is encoded directly in the weights,
+so a perfect agent naturally lands at a task-appropriate score:
 
-  Task    Expected Range   What earns full score
-  ──────  ──────────────   ─────────────────────
-  easy    0.70 – 1.00      4 docs + HR + tax_id + payroll + finalized
-  medium  0.40 – 0.80      3 docs + HR + Legal + payroll + pdpa + shadow + finalized
-  hard    0.20 – 0.60      4 docs + HR + Legal + Finance + tax_id(DE) + payroll + no UAE tax + finalized
-  crisis  0.40 – 0.90      4 docs (incl ict_permit) + HR + Legal + tax_id + payroll
-                           + regulatory event acknowledged + finalized
+  Task    Perfect Score   What earns it
+  ──────  ─────────────   ─────────────
+  easy    ~0.95           4 docs + HR + tax_id + payroll + finalize
+  medium  ~0.80           3 docs + HR + Legal + payroll + pdpa + shadow + finalize
+  crisis  ~0.75           4 docs (incl ict_permit) + HR + Legal + tax_id + payroll
+                          + regulatory event acknowledged + finalize
+  hard    ~0.65           4 docs + HR + Legal + Finance + tax_id + payroll
+                          + conflict resolved + finalize (+ UAE trap avoided)
+
+Why this ordering? Harder tasks have MORE requirements, so each requirement
+is worth proportionally less. A perfect Hard score is lower than a perfect
+Easy score because the same 100% completion represents more work on Hard.
+
+Penalties:
+  UAE tax violation (hard):       -0.25
+  Visa-after-event (crisis):      -0.20 per occurrence
+  Parsimony (all tasks):          -0.03 per junk action, capped at -0.15
+
+Epsilon floor:
+  Scores are clamped to (0.0001, 0.9999) — strictly between 0 and 1.
+  This is the ONLY clamp; no task-specific ceilings.
 
 Public API:
-  grade(task_name, state) → float   main dispatcher used by environment.py
-  explain(task_name, state) → str   human-readable breakdown for debugging
+  grade(task_name, state) → float   main dispatcher (used by environment.py)
+  explain(task_name, state) → str   human-readable breakdown
 
 Author: Team AI Kalesh
 """
@@ -29,7 +44,7 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
-# CRITICAL: Epsilon to ensure scores are NEVER exactly 0.0 or 1.0
+# Epsilon — the only score boundary
 # ---------------------------------------------------------------------------
 
 _EPSILON = 0.0001
@@ -43,24 +58,16 @@ _TASK_DOCS: dict[str, list[str]] = {
     "easy":   ["passport", "visa", "employment_letter", "work_permit"],
     "medium": ["passport", "visa", "employment_letter"],
     "hard":   ["passport", "visa", "employment_letter", "work_permit"],
-    # crisis: ict_permit replaces visa after the event fires
+    # crisis: visa is replaced by ict_permit after the event fires
     "crisis": ["passport", "employment_letter", "work_permit", "ict_permit"],
 }
 
-# ---------------------------------------------------------------------------
-# Required compliance per task — must match tasks.py exactly
-# ---------------------------------------------------------------------------
-
 _TASK_COMPLIANCE: dict[str, list[str]] = {
     "easy":   ["tax_id", "payroll"],
-    "medium": ["payroll", "pdpa", "shadow_payroll"],   # no tax_id for Singapore
+    "medium": ["payroll", "pdpa", "shadow_payroll"],
     "hard":   ["tax_id", "payroll"],
-    "crisis": ["tax_id", "payroll"],                   # Germany rules
+    "crisis": ["tax_id", "payroll"],
 }
-
-# ---------------------------------------------------------------------------
-# Required departments per task — must match tasks.py exactly
-# ---------------------------------------------------------------------------
 
 _TASK_DEPARTMENTS: dict[str, list[str]] = {
     "easy":   ["HR"],
@@ -69,85 +76,47 @@ _TASK_DEPARTMENTS: dict[str, list[str]] = {
     "crisis": ["HR", "Legal"],
 }
 
-# ---------------------------------------------------------------------------
-# Task score ceilings
-# ---------------------------------------------------------------------------
-
-_TASK_CEILING: dict[str, float] = {
-    "easy":   0.95,
-    "medium": 0.75,
-    "hard":   0.60,
-    "crisis": 0.89,
-}
 
 # ---------------------------------------------------------------------------
-# Valid actions per task — used for parsimony penalty
+# Valid actions per task — for parsimony penalty
 # ---------------------------------------------------------------------------
 
 _EASY_VALID_ACTIONS: set[str] = {
-    "request_document:passport",
-    "verify_document:passport",
-    "request_document:visa",
-    "verify_document:visa",
-    "request_document:employment_letter",
-    "verify_document:employment_letter",
-    "request_document:work_permit",
-    "verify_document:work_permit",
-    "approve_hr",
-    "set_payroll",
-    "set_tax_id",
-    "finalize_case",
+    "request_document:passport",    "verify_document:passport",
+    "request_document:visa",        "verify_document:visa",
+    "request_document:employment_letter", "verify_document:employment_letter",
+    "request_document:work_permit", "verify_document:work_permit",
+    "approve_hr", "set_payroll", "set_tax_id", "finalize_case",
 }
 
 _MEDIUM_VALID_ACTIONS: set[str] = {
-    "request_document:passport",
-    "verify_document:passport",
-    "request_document:visa",
-    "verify_document:visa",
-    "request_document:employment_letter",
-    "verify_document:employment_letter",
-    "approve_hr",
-    "approve_legal",
-    "set_payroll",
-    "set_pdpa",
-    "set_shadow_payroll",
+    "request_document:passport",    "verify_document:passport",
+    "request_document:visa",        "verify_document:visa",
+    "request_document:employment_letter", "verify_document:employment_letter",
+    "approve_hr", "approve_legal",
+    "set_payroll", "set_pdpa", "set_shadow_payroll",
     "finalize_case",
 }
 
 _HARD_VALID_ACTIONS: set[str] = {
-    "request_document:passport",
-    "verify_document:passport",
-    "request_document:visa",
-    "verify_document:visa",
-    "request_document:employment_letter",
-    "verify_document:employment_letter",
-    "request_document:work_permit",
-    "verify_document:work_permit",
-    "approve_hr",
-    "approve_legal",
-    "approve_finance",
-    "set_payroll",
-    "set_tax_id",
-    "resolve_conflict",
+    "request_document:passport",    "verify_document:passport",
+    "request_document:visa",        "verify_document:visa",
+    "request_document:employment_letter", "verify_document:employment_letter",
+    "request_document:work_permit", "verify_document:work_permit",
+    "approve_hr", "approve_legal", "approve_finance",
+    "set_payroll", "set_tax_id", "resolve_conflict",
     "finalize_case",
 }
 
 _CRISIS_VALID_ACTIONS: set[str] = {
-    "request_document:passport",
-    "verify_document:passport",
-    "request_document:visa",            # valid BEFORE event fires (steps 1-7)
-    "verify_document:visa",             # valid BEFORE event fires (steps 1-7)
-    "request_document:employment_letter",
-    "verify_document:employment_letter",
-    "request_document:work_permit",
-    "verify_document:work_permit",
-    "request_document:ict_permit",      # valid AFTER event fires
-    "verify_document:ict_permit",       # valid AFTER event fires
-    "acknowledge_regulatory_change",    # the key crisis action
-    "approve_hr",
-    "approve_legal",
-    "set_payroll",
-    "set_tax_id",
+    "request_document:passport",    "verify_document:passport",
+    "request_document:visa",        "verify_document:visa",      # valid BEFORE event
+    "request_document:employment_letter", "verify_document:employment_letter",
+    "request_document:work_permit", "verify_document:work_permit",
+    "request_document:ict_permit",  "verify_document:ict_permit",  # valid AFTER event
+    "acknowledge_regulatory_change",
+    "approve_hr", "approve_legal",
+    "set_payroll", "set_tax_id",
     "finalize_case",
 }
 
@@ -160,7 +129,7 @@ _VALID_ACTIONS_MAP: dict[str, set[str]] = {
 
 
 # ---------------------------------------------------------------------------
-# Parsimony penalty
+# Parsimony penalty — discourages junk actions
 # ---------------------------------------------------------------------------
 
 def _parsimony_penalty(prev_actions: list[str], valid_actions: set[str]) -> float:
@@ -176,6 +145,22 @@ def _parsimony_penalty(prev_actions: list[str], valid_actions: set[str]) -> floa
 
 
 # ---------------------------------------------------------------------------
+# Score finalizer — the ONLY clamp
+# ---------------------------------------------------------------------------
+
+def _finalize_score(raw: float) -> float:
+    """
+    Clamp to strictly (0, 1). No task-specific ceilings applied.
+    """
+    score = round(raw, 4)
+    if score <= 0.0:
+        return _EPSILON
+    if score >= 1.0:
+        return 1.0 - _EPSILON
+    return score
+
+
+# ---------------------------------------------------------------------------
 # Public dispatcher
 # ---------------------------------------------------------------------------
 
@@ -183,12 +168,9 @@ def grade(task_name: str, state: dict[str, Any]) -> float:
     """
     Main entry point. Called by environment.py after every episode end.
 
-    Args:
-        task_name: "easy" | "medium" | "hard" | "crisis"
-        state:     Episode state dict.
-
     Returns:
-        Float strictly in (0.0, 1.0) — never exactly 0.0 or 1.0.
+        Float strictly in (0.0, 1.0). No ceilings — difficulty is encoded
+        in the per-task weights below.
     """
     graders = {
         "easy":   grade_easy,
@@ -201,12 +183,6 @@ def grade(task_name: str, state: dict[str, Any]) -> float:
             f"Unknown task '{task_name}'. Valid: {list(graders.keys())}"
         )
     score = graders[task_name](state)
-
-    if score <= 0.0:
-        score = _EPSILON
-    elif score >= 1.0:
-        score = 1.0 - _EPSILON
-
     assert 0.0 < score < 1.0, f"Grader returned out-of-range score: {score}"
     return score
 
@@ -224,15 +200,16 @@ def explain(task_name: str, state: dict[str, Any]) -> str:
     return reporters[task_name](state)
 
 
-# ---------------------------------------------------------------------------
-# EASY grader — India → Germany
-#
-# Weights (sum = 1.0):
-#   Documents verified    0.40   (4 docs, 0.10 each)
-#   HR approved           0.25
-#   Compliance            0.25   (tax_id 0.125 + payroll 0.125)
-#   Finalized             0.10
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# EASY grader — perfect score ≈ 0.95
+# ===========================================================================
+# Weights (sum = 0.95):
+#   Documents verified    0.40  (4 docs × 0.10)
+#   HR approved           0.20
+#   tax_id                0.15
+#   payroll               0.15
+#   Finalized             0.05
+# ===========================================================================
 
 def grade_easy(state: dict[str, Any]) -> float:
     docs       = state.get("documents", {})
@@ -242,51 +219,44 @@ def grade_easy(state: dict[str, Any]) -> float:
     prev_acts  = state.get("previous_actions", [])
 
     required_docs = _TASK_DOCS["easy"]
-    required_comp = _TASK_COMPLIANCE["easy"]
 
-    # Documents (0.40)
+    # Documents (0.40 — 0.10 per doc)
     verified = sum(
         1 for d in required_docs
         if docs.get(d, {}).get("status") == "verified"
     )
     doc_score = (verified / len(required_docs)) * 0.40
 
-    # HR approval (0.25)
-    hr_score = 0.25 if depts.get("HR", False) else 0.0
+    # Department (0.20)
+    hr_score = 0.20 if depts.get("HR", False) else 0.0
 
-    # Compliance (0.25)
-    comp_done = sum(1 for c in required_comp if compliance.get(c, False))
-    comp_score = (comp_done / len(required_comp)) * 0.25
+    # Compliance (0.30 split as 0.15 each)
+    tax_score     = 0.15 if compliance.get("tax_id", False) else 0.0
+    payroll_score = 0.15 if compliance.get("payroll", False) else 0.0
 
-    # Finalized (0.10)
-    fin_score = 0.10 if status == "success" else 0.0
+    # Finalized (0.05)
+    fin_score = 0.05 if status == "success" else 0.0
 
-    raw = doc_score + hr_score + comp_score + fin_score
+    raw = doc_score + hr_score + tax_score + payroll_score + fin_score
 
     # Parsimony penalty
     raw -= _parsimony_penalty(prev_acts, _EASY_VALID_ACTIONS)
 
-    final_score = max(_EPSILON, min(0.9499, raw))
-    final_score = round(final_score, 4)
-
-    if final_score <= 0.0:
-        final_score = _EPSILON
-    elif final_score >= 1.0:
-        final_score = 1.0 - _EPSILON
-
-    return final_score
+    return _finalize_score(raw)
 
 
-# ---------------------------------------------------------------------------
-# MEDIUM grader — India → Singapore
-#
-# Weights (sum = 1.0):
-#   Documents verified    0.30   (3 docs, 0.10 each)
-#   HR approved           0.15
-#   Legal approved        0.20
-#   Compliance            0.25   (payroll 0.08 + pdpa 0.09 + shadow 0.08)
-#   Finalized             0.10
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# MEDIUM grader — perfect score ≈ 0.80
+# ===========================================================================
+# Weights (sum = 0.80):
+#   Documents verified    0.24  (3 docs × 0.08)
+#   HR approved           0.12
+#   Legal approved        0.14
+#   payroll               0.08
+#   pdpa                  0.08
+#   shadow_payroll        0.08
+#   Finalized             0.06
+# ===========================================================================
 
 def grade_medium(state: dict[str, Any]) -> float:
     docs       = state.get("documents", {})
@@ -296,58 +266,52 @@ def grade_medium(state: dict[str, Any]) -> float:
     prev_acts  = state.get("previous_actions", [])
 
     required_docs = _TASK_DOCS["medium"]
-    required_comp = _TASK_COMPLIANCE["medium"]
 
-    # Documents (0.30)
+    # Documents (0.24 — 0.08 per doc)
     verified = sum(
         1 for d in required_docs
         if docs.get(d, {}).get("status") == "verified"
     )
-    doc_score = (verified / len(required_docs)) * 0.30
+    doc_score = (verified / len(required_docs)) * 0.24
 
-    # HR (0.15)
-    hr_score = 0.15 if depts.get("HR", False) else 0.0
+    # Departments
+    hr_score    = 0.12 if depts.get("HR", False) else 0.0
+    legal_score = 0.14 if depts.get("Legal", False) else 0.0
 
-    # Legal (0.20)
-    legal_score = 0.20 if depts.get("Legal", False) else 0.0
+    # Compliance (0.08 each)
+    payroll_score = 0.08 if compliance.get("payroll", False) else 0.0
+    pdpa_score    = 0.08 if compliance.get("pdpa", False) else 0.0
+    shadow_score  = 0.08 if compliance.get("shadow_payroll", False) else 0.0
 
-    # Compliance (0.25)
-    comp_done = sum(1 for c in required_comp if compliance.get(c, False))
-    comp_score = (comp_done / len(required_comp)) * 0.25
+    # Finalized
+    fin_score = 0.06 if status == "success" else 0.0
 
-    # Finalized (0.10)
-    fin_score = 0.10 if status == "success" else 0.0
+    raw = (
+        doc_score + hr_score + legal_score
+        + payroll_score + pdpa_score + shadow_score
+        + fin_score
+    )
 
-    raw = doc_score + hr_score + legal_score + comp_score + fin_score
-
-    # Parsimony penalty
     raw -= _parsimony_penalty(prev_acts, _MEDIUM_VALID_ACTIONS)
 
-    final_score = max(_EPSILON, min(0.7499, raw))
-    final_score = round(final_score, 4)
-
-    if final_score >= 0.75:
-        final_score = 0.7499
-    if final_score <= 0.0:
-        final_score = _EPSILON
-
-    return final_score
+    return _finalize_score(raw)
 
 
-# ---------------------------------------------------------------------------
-# HARD grader — India → Germany + UAE
-#
-# Weights (sum = 0.90, ceiling = 0.60):
-#   Documents verified    0.25
-#   HR approved           0.08
+# ===========================================================================
+# HARD grader — perfect score ≈ 0.65 (AFTER UAE trap avoided)
+# ===========================================================================
+# Weights (sum = 0.65):
+#   Documents verified    0.20  (4 docs × 0.05)
+#   HR approved           0.06
 #   Legal approved        0.08
 #   Finance approved      0.08
-#   Compliance done       0.16  (tax_id 0.08 + payroll 0.08)
-#   Conflict resolved     0.15
-#   Finalized             0.10
+#   tax_id                0.05
+#   payroll               0.05
+#   Conflict resolved     0.08
+#   Finalized             0.05
 #
-# UAE trap penalty: -0.25 if set_tax_id:UAE called
-# ---------------------------------------------------------------------------
+# Penalty: UAE tax violation = -0.25
+# ===========================================================================
 
 def grade_hard(state: dict[str, Any]) -> float:
     docs       = state.get("documents", {})
@@ -358,41 +322,36 @@ def grade_hard(state: dict[str, Any]) -> float:
     prev_acts  = state.get("previous_actions", [])
 
     required_docs = _TASK_DOCS["hard"]
-    required_comp = _TASK_COMPLIANCE["hard"]
 
-    # Documents (0.25)
+    # Documents (0.20 — 0.05 per doc)
     verified = sum(
         1 for d in required_docs
         if docs.get(d, {}).get("status") == "verified"
     )
-    doc_score = (verified / len(required_docs)) * 0.25 if required_docs else 0.0
+    doc_score = (verified / len(required_docs)) * 0.20
 
-    # HR (0.08)
-    hr_score = 0.08 if depts.get("HR", False) else 0.0
-
-    # Legal (0.08)
-    legal_score = 0.08 if depts.get("Legal", False) else 0.0
-
-    # Finance (0.08)
+    # Departments
+    hr_score      = 0.06 if depts.get("HR", False) else 0.0
+    legal_score   = 0.08 if depts.get("Legal", False) else 0.0
     finance_score = 0.08 if depts.get("Finance", False) else 0.0
 
-    # Compliance (0.16 total)
-    comp_done = sum(1 for c in required_comp if compliance.get(c, False))
-    comp_score = (comp_done / len(required_comp)) * 0.16 if required_comp else 0.0
+    # Compliance
+    tax_score     = 0.05 if compliance.get("tax_id", False) else 0.0
+    payroll_score = 0.05 if compliance.get("payroll", False) else 0.0
 
-    # Conflict resolved (0.15)
+    # Conflict resolution
     if conflicts:
         all_resolved = all(c.get("resolved", False) for c in conflicts)
-        conflict_score = 0.15 if all_resolved else 0.0
+        conflict_score = 0.08 if all_resolved else 0.0
     else:
         conflict_score = 0.0
 
-    # Finalized (0.10)
-    fin_score = 0.10 if status == "success" else 0.0
+    # Finalized
+    fin_score = 0.05 if status == "success" else 0.0
 
     raw = (
         doc_score + hr_score + legal_score + finance_score
-        + comp_score + conflict_score + fin_score
+        + tax_score + payroll_score + conflict_score + fin_score
     )
 
     # UAE tax violation penalty
@@ -400,38 +359,27 @@ def grade_hard(state: dict[str, Any]) -> float:
     if uae_tax_called:
         raw -= 0.25
 
-    # Parsimony penalty
     raw -= _parsimony_penalty(prev_acts, _HARD_VALID_ACTIONS)
 
-    final_score = max(_EPSILON, min(0.5999, raw))
-    final_score = round(final_score, 4)
-
-    if final_score >= 0.60:
-        final_score = 0.5999
-    if final_score <= 0.0:
-        final_score = _EPSILON
-
-    return final_score
+    return _finalize_score(raw)
 
 
-# ---------------------------------------------------------------------------
-# CRISIS grader — India → Germany with mid-episode regulatory disruption
+# ===========================================================================
+# CRISIS grader — perfect score ≈ 0.75 (AFTER event handled correctly)
+# ===========================================================================
+# Weights (sum = 0.75):
+#   Documents verified    0.32  (4 docs × 0.08)
+#   HR approved           0.08
+#   Legal approved        0.10
+#   tax_id                0.08
+#   payroll               0.07
+#   Regulatory handled    0.05  (event fired + acknowledged)
+#   Finalized             0.05
 #
-# Weights (sum = 1.0):
-#   Docs verified (4)     0.35  (passport, employment_letter, work_permit, ict_permit)
-#   HR approved           0.15
-#   Legal approved        0.15
-#   Compliance            0.15  (tax_id + payroll)
-#   Regulatory handled    0.10  (event fired + acknowledged)
-#   Finalized             0.10
-#
-# Penalty: using invalidated visa after event fires: -0.20 per occurrence
-# Score ceiling: 0.89  |  Expected range: 0.40 – 0.90
-#
-# Key design intent:
-#   Agent that ignores the event and finalizes with old visa scores < 0.40.
-#   Agent that correctly adapts scores 0.75 – 0.89.
-# ---------------------------------------------------------------------------
+# Penalties:
+#   Using visa after event: -0.20 per occurrence
+#   Parsimony: standard
+# ===========================================================================
 
 def grade_crisis(state: dict[str, Any]) -> float:
     docs       = state.get("documents", {})
@@ -440,41 +388,41 @@ def grade_crisis(state: dict[str, Any]) -> float:
     status     = state.get("status", "in_progress")
     prev_acts  = state.get("previous_actions", [])
 
-    # Required docs: ict_permit replaces visa
     required_docs = _TASK_DOCS["crisis"]
-    required_comp = _TASK_COMPLIANCE["crisis"]
 
-    # Documents (0.35)
+    # Documents (0.32 — 0.08 per doc)
     verified = sum(
         1 for d in required_docs
         if docs.get(d, {}).get("status") == "verified"
     )
-    doc_score = (verified / len(required_docs)) * 0.35
+    doc_score = (verified / len(required_docs)) * 0.32
 
-    # HR (0.15)
-    hr_score = 0.15 if depts.get("HR", False) else 0.0
+    # Departments
+    hr_score    = 0.08 if depts.get("HR", False) else 0.0
+    legal_score = 0.10 if depts.get("Legal", False) else 0.0
 
-    # Legal (0.15)
-    legal_score = 0.15 if depts.get("Legal", False) else 0.0
+    # Compliance
+    tax_score     = 0.08 if compliance.get("tax_id", False) else 0.0
+    payroll_score = 0.07 if compliance.get("payroll", False) else 0.0
 
-    # Compliance: tax_id + payroll (0.15)
-    comp_done = sum(1 for c in required_comp if compliance.get(c, False))
-    comp_score = (comp_done / len(required_comp)) * 0.15
-
-    # Regulatory event handling (0.10)
+    # Regulatory event handling (0.05)
     event_fired = state.get("regulatory_event_fired", False)
     event_ack   = state.get("regulatory_event_acknowledged", False)
     if event_fired and event_ack:
-        regulatory_score = 0.10
+        regulatory_score = 0.05
     elif event_fired and not event_ack:
-        regulatory_score = 0.03   # partial — fired but not handled
+        regulatory_score = 0.015   # partial — fired but not handled
     else:
-        regulatory_score = 0.0    # hasn't fired yet
+        regulatory_score = 0.0     # hasn't fired yet
 
-    # Finalized (0.10)
-    fin_score = 0.10 if status == "success" else 0.0
+    # Finalized
+    fin_score = 0.05 if status == "success" else 0.0
 
-    raw = doc_score + hr_score + legal_score + comp_score + regulatory_score + fin_score
+    raw = (
+        doc_score + hr_score + legal_score
+        + tax_score + payroll_score
+        + regulatory_score + fin_score
+    )
 
     # Penalty: using invalidated visa AFTER the system event marker
     system_event_idx = next(
@@ -489,19 +437,9 @@ def grade_crisis(state: dict[str, Any]) -> float:
         )
         raw -= visa_violations * 0.20
 
-    # Parsimony penalty
     raw -= _parsimony_penalty(prev_acts, _CRISIS_VALID_ACTIONS)
 
-    # Ceiling clamp
-    final_score = max(_EPSILON, min(0.8899, raw))
-    final_score = round(final_score, 4)
-
-    if final_score >= 0.89:
-        final_score = 0.8899
-    if final_score <= 0.0:
-        final_score = _EPSILON
-
-    return final_score
+    return _finalize_score(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +464,7 @@ def _explain_easy(state: dict[str, Any]) -> str:
         f"HR:          {'✓' if depts.get('HR') else '✗'}",
         f"Compliance:  {len(comp_done)}/{len(required_comp)} done {comp_done}",
         f"Status:      {status}",
-        f"Score:       {grade_easy(state):.4f}",
+        f"Score:       {grade_easy(state):.4f}  (perfect ≈ 0.95)",
     ]
     return "\n".join(lines)
 
@@ -550,7 +488,7 @@ def _explain_medium(state: dict[str, Any]) -> str:
         f"Legal:       {'✓' if depts.get('Legal') else '✗'}",
         f"Compliance:  {len(comp_done)}/{len(required_comp)} done {comp_done}",
         f"Status:      {status}",
-        f"Score:       {grade_medium(state):.4f}",
+        f"Score:       {grade_medium(state):.4f}  (perfect ≈ 0.80)",
     ]
     return "\n".join(lines)
 
@@ -581,7 +519,7 @@ def _explain_hard(state: dict[str, Any]) -> str:
         f"UAE no-tax rule:  {'✗ VIOLATED (-0.25)' if uae_tax_called else '✓ respected'}",
         f"Conflicts:        {'✓ resolved' if resolved else '✗ unresolved'}",
         f"Status:           {status}",
-        f"Score:            {grade_hard(state):.4f}",
+        f"Score:            {grade_hard(state):.4f}  (perfect ≈ 0.65)",
     ]
     return "\n".join(lines)
 
@@ -621,10 +559,10 @@ def _explain_crisis(state: dict[str, Any]) -> str:
         f"Legal:              {'✓' if depts.get('Legal') else '✗'}",
         f"Compliance:         {len(comp_done)}/{len(required_comp)} done {comp_done}",
         f"Event fired:        {'✓' if event_fired else '✗ (not yet)'}",
-        f"Event acknowledged: {'✓' if event_ack else '✗ (-0.07 regulatory score)'}",
-        f"Visa violations:    {visa_violations} post-event uses × -0.20",
+        f"Event acknowledged: {'✓' if event_ack else '✗'}",
+        f"Visa violations:    {visa_violations} × -0.20",
         f"Status:             {status}",
-        f"Score:              {grade_crisis(state):.4f}",
+        f"Score:              {grade_crisis(state):.4f}  (perfect ≈ 0.75)",
     ]
     return "\n".join(lines)
 

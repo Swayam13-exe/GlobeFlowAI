@@ -55,4 +55,81 @@ domain_rules:
 fixtures:
   - fixtures/country_rules.json
   - fixtures/visa_types.json
+  - fixtures/tax_treaties.json# openenv-workforce metadata and task registry
+# ============================================
+# Schema: OpenEnv v1.0
+# Target runtime: openenv-core >= 0.2.3
+
+name: openenv-workforce
+version: 2.0.0
+description: >
+  Workforce mobility simulation environment. AI agent must relocate employees
+  across countries (India → Germany / Singapore / UAE) while navigating
+  visa, tax, payroll, and compliance rules. Includes the UAE no-tax trap,
+  multi-country conflict resolution (hard task), and a mid-episode
+  regulatory disruption mechanic (crisis task) that tests long-horizon
+  adaptation under changing rules.
+
+entrypoint: main:app
+port: 7860
+
+env:
+  reset_endpoint:  POST /reset
+  step_endpoint:   POST /step
+  state_endpoint:  GET  /state
+  health_endpoint: GET  /health
+
+tasks:
+  - id: easy
+    path: env/tasks.py::TASKS["easy"]
+    grader: graders/graders.py::grade_easy
+    description: "India → Germany | Engineer | No dependents | 4 docs + HR + tax_id + payroll"
+    countries: ["Germany"]
+    expected_score_range: [0.70, 0.95]
+    max_steps: 25
+
+  - id: medium
+    path: env/tasks.py::TASKS["medium"]
+    grader: graders/graders.py::grade_medium
+    description: "India → Singapore | Manager | Has dependents | 3 docs + HR + Legal + PDPA + shadow payroll"
+    countries: ["Singapore"]
+    expected_score_range: [0.40, 0.80]
+    max_steps: 25
+
+  - id: hard
+    path: env/tasks.py::TASKS["hard"]
+    grader: graders/graders.py::grade_hard
+    description: "India → Germany + UAE | Director | Multi-country | UAE no-tax trap + conflict resolution"
+    countries: ["Germany", "UAE"]
+    expected_score_range: [0.20, 0.65]
+    max_steps: 25
+
+  - id: crisis
+    path: env/tasks.py::TASKS["crisis"]
+    grader: graders/graders.py::grade_crisis
+    description: "India → Germany | Manager | Mid-episode regulatory disruption — Blue Card visa suspended at step 8, agent must detect change, acknowledge, and switch to ICT Permit"
+    countries: ["Germany"]
+    expected_score_range: [0.40, 0.75]
+    max_steps: 35
+
+domain_rules:
+  - "Germany requires visa, work_permit, and tax_id registration"
+  - "Singapore requires Employment Pass, PDPA consent, and shadow payroll"
+  - "UAE has NO income tax — set_tax_id:UAE is a critical rule violation (-0.25)"
+  - "Legal approval requires ALL documents to be verified first"
+  - "Finance approval requires Legal approval first"
+  - "Hard task: resolve_conflict must be called before approve_finance"
+  - "Crisis task: at step 8 the Blue Card visa is suspended — agent must call acknowledge_regulatory_change and switch to ict_permit. Using visa after the event = -0.3 rule violation."
+
+fixtures:
+  - fixtures/country_rules.json
+  - fixtures/visa_types.json
   - fixtures/tax_treaties.json
+
+themes:
+  primary:
+    - "Theme 3.1 — World Modeling (Professional Tasks)"
+    - "Theme 2 — Long-Horizon Planning & Instruction Following"
+  bonus_alignment:
+    - "Scaler AI Labs — Multi-App RL Environment for Enterprise Workflows"
+    - "Scale AI — Long-horizon workflows for HR & IT"

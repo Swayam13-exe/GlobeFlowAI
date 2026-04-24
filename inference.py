@@ -124,8 +124,8 @@ Valid action_types and targets:
                                     (passport/visa/employment_letter/work_permit/ict_permit)
   verify_document               → target = document name (must request first)
   approve_hr                    → target = "" (no prerequisites)
-  approve_legal                 → target = "" (ALL documents must be verified first)
-  approve_finance               → target = "" (Legal must approve first, conflicts resolved)
+  approve_legal                 → target = "" (ALL required documents verified first)
+  approve_finance               → target = "" (Legal approved, conflicts resolved)
   set_payroll                   → target = "" or country name
   set_tax_id                    → target = "" or country name (Germany ONLY, never UAE)
   set_shadow_payroll            → target = "" (Singapore only)
@@ -136,20 +136,35 @@ Valid action_types and targets:
 
 CRITICAL RULES:
 1. ALWAYS request_document before verify_document
-2. Legal approves ONLY after ALL documents are verified
+2. Legal approves ONLY after ALL required documents are verified
 3. Finance approves ONLY after Legal approves
 4. UAE has NO income tax — NEVER call set_tax_id for UAE
 5. Hard task: call resolve_conflict BEFORE approve_finance
 
-CRISIS TASK — REGULATORY EVENT HANDLING:
-6. If you see "REGULATORY ALERT" in the observation, the Blue Card visa
-   has been SUSPENDED. You MUST:
-   a. Call acknowledge_regulatory_change FIRST
-   b. Then request_document for "ict_permit" (the new required document)
-   c. Then verify_document for "ict_permit"
-   d. NEVER use the old visa document after the alert — that is a rule violation
-7. Always check "Available actions:" and pick from there when possible
-8. Only call finalize_case when it appears in available_actions
+CRISIS TASK — REGULATORY EVENT HANDLING (exact sequence):
+6. If you see "REGULATORY ALERT" in the observation, the Blue Card visa is
+   SUSPENDED. Follow this EXACT sequence and DO NOT repeat steps:
+   a. ONLY call acknowledge_regulatory_change when you ACTUALLY SEE the
+      "REGULATORY ALERT" text in the observation. NEVER call it before the
+      alert appears — that wastes a step.
+   b. Once the alert appears, call acknowledge_regulatory_change ONCE
+   c. Call request_document with target "ict_permit" ONCE
+   d. Call verify_document with target "ict_permit" ONCE
+   e. NEVER call request_document or verify_document for "visa" after the alert
+      — that is a -0.30 rule violation
+   f. Once ict_permit is VERIFIED (status shows "verified"), CONTINUE the
+      workflow: approve_legal → set_tax_id (Germany) → set_payroll (Germany)
+      → finalize_case
+   g. If an action returns "already performed", do NOT repeat it — pick the
+      next action from "Available actions:"
+
+GENERAL GUIDANCE:
+7. ALWAYS pick from the "Available actions:" list when possible — those are
+   the actions the environment will accept right now.
+8. If the last action was an error, READ the error message and pick a
+   different action — NEVER repeat a failed action.
+9. Only call finalize_case when it appears in available_actions — that means
+   all requirements have been met.
 """).strip()
 
 

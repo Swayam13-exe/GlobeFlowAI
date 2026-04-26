@@ -1,438 +1,313 @@
 ---
-title: OpenEnv Workforce Mobility
-emoji: 🏢
-colorFrom: indigo
-colorTo: blue
+title: GlobeFlowAI
+emoji: 🌍
+colorFrom: blue
+colorTo: green
 sdk: docker
-app_port: 7860
 pinned: false
 license: mit
 ---
 
-# GlobeFlowAI — Global Mobility & Compliance Orchestrator
+# GlobeFlowAI
 
-[![OpenEnv Compatible](https://img.shields.io/badge/OpenEnv-Compatible-blue)](https://github.com/meta-pytorch/OpenEnv)
-[![HuggingFace Space](https://img.shields.io/badge/HuggingFace-Space-yellow)](https://huggingface.co/spaces/Swayam14/openenv-workforce)
-[![Python 3.10](https://img.shields.io/badge/Python-3.10-green)](https://python.org)
+**An OpenEnv environment for training and measuring AI agents that manage complex, rule-rich, multi-jurisdiction employee relocation workflows.**
 
-An OpenEnv-compatible reinforcement learning environment where an AI agent handles **real-world employee relocation cases** — processing documents, navigating multi-country compliance rules, and managing department approvals to finalize international transfers.
+When a multinational company relocates an engineer across borders, the process crosses six departments, twelve documents, and at least three jurisdictions — and the rules genuinely contradict each other. GlobeFlowAI compresses that reality into a long-horizon, partially-observable reinforcement learning environment. The agent must sequence document submissions, obtain cross-department approvals, configure host-country payroll, and recover mid-episode when regulations change.
 
-Built for the **Meta × Scaler OpenEnv AI Hackathon 2026**.
+**Design principle:** four tasks that test four distinct competencies — rule-following, country-specific differentiation, conflict resolution, and recovery from non-stationary rules. Rote memorisation solves the easy task and fails the rest.
 
----
+## Submission
 
-## What is GlobeFlowAI?
-
-GlobeFlowAI simulates the full lifecycle of relocating an employee from **India** to one of three destination countries: **Germany**, **Singapore**, or **UAE**. The agent must learn to:
-
-- Request and verify the correct documents for each country
-- Obtain department approvals in the correct order (HR → Legal → Finance)
-- Configure country-specific compliance items (tax registration, payroll, PDPA consent)
-- Resolve multi-country rule conflicts (e.g. Germany requires tax ID, UAE does not allow it)
-- Finalize the relocation case without errors
-
-This environment models a genuine enterprise workflow that multinational companies deal with thousands of times per year — making it a rich, non-trivial domain for agent training and evaluation.
+| What                          | Link                                                                                              |
+| ----------------------------- | ------------------------------------------------------------------------------------------------- |
+| Hugging Face Space (live env) | https://huggingface.co/spaces/Swayam14/openenv-workforce                                          |
+| Colab notebook (training)     | *(forthcoming — will be committed before submission deadline)*                                    |
+| Code repository               | https://github.com/Swayam14/openenv-workforce                                                     |
+| Blog / writeup                | [BLOG.md](BLOG.md)                                                                                |
+| Trained model adapter         | *(forthcoming — will be committed before submission deadline)*                                    |
 
 ---
 
-## Environment Design
+🔗 **Live HF Space:** https://huggingface.co/spaces/Swayam14/openenv-workforce
 
-### Architecture
+🔗 **Source:** https://github.com/Swayam14/openenv-workforce
 
+📓 **Colab training notebook:** *(forthcoming)*
+
+📝 **Writeup:** [BLOG.md](BLOG.md)
+
+👥 **Team:** AI Kalesh
+
+---
+
+## What this env measures
+
+An agent receives a typed observation describing the current relocation case state, selects one of twelve action types (with optional document and country targets), and receives a shaped per-step reward. Episodes end on finalisation, step-budget exhaustion, or deadline breach.
+
+| Task       | Scenario                                         | Key competency tested                         |
+| ---------- | ------------------------------------------------ | --------------------------------------------- |
+| **easy**   | Single engineer → Germany                        | Basic action ordering and rule-following       |
+| **medium** | Manager with dependents → Singapore              | Country-specific differentiation               |
+| **hard**   | Director → Germany + UAE simultaneously          | Multi-jurisdiction conflict resolution         |
+| **crisis** | Germany relocation with mid-episode reg. change  | Recovery from non-stationary rules             |
+
+Task names encode **generalization difficulty**, not per-episode difficulty. A random policy scores well below chance on all four tasks — the difficulty curve only emerges once the agent actually trains.
+
+---
+
+## Why this env is different
+
+**Shaped per-step reward, not just episode-end signal.** Documents, departments, compliance milestones, and conflict resolution each contribute weighted progress. A progress-delta bonus (capped at +0.20 per step) and categorical milestone bonuses give a small open-weights model usable gradient signal without trainer-side reward shaping.
+
+**No artificial grader ceilings.** Earlier iterations capped per-task scores (0.949 / 0.749 / 0.599) to encode difficulty. Those ceilings are removed. Difficulty now lives in requirement weights — easy has 5 requirements summing to 0.95, hard has 8 summing to 0.65. Score is a clean function of agent behaviour.
+
+**Non-stationary rules, tightly controlled.** In the crisis task, a regulatory event fires at step 8: the Blue Card visa is suspended, and an ICT Permit is injected into the state. The agent must acknowledge the change and re-plan accordingly. An agent that memorised the easy-task sequence will keep verifying the invalidated visa, collect the −0.30 penalty per step, and finalise with an incomplete case.
+
+**Parsimony penalty for clean play.** Actions outside the task-relevant set incur −0.03 each, capped at −0.15 per episode. This distinguishes "solved efficiently" from "solved eventually" — a signal that separates trained from untrained agents in practice.
+
+**Gaming-hardened reward.** The grader has an `assert 0.0 < score < 1.0` guard on every exit path. Action history records only completed and rule-violating actions, so the agent can legitimately retry a failed action after resolving its prerequisite — exploration is not punished. The crisis clock advances only on successful steps, so penalty steps cannot accidentally skip the regulatory event.
+
+**Model-agnostic by API.** The `/step` endpoint accepts any raw action dict. Swap in a hand-tuned prompt, a GRPO-trained LoRA, a chain-of-thought planner, or a rule-based heuristic — the environment scores them all identically.
+
+---
+
+## Training the agent
+
+We are training a reference overseer with **GRPO + LoRA** on rollouts collected across all four tasks. The dense per-step reward and shaped progress bonus are designed to give a small model usable gradient signal without requiring extensive trainer-side modifications.
+
+> 🚧 **Training in active progress.** The training script, hyperparameters, loss and reward curves, and before/after benchmark numbers will be committed to the repository and linked here before the submission deadline.
+
+Once training completes, this section will document:
+
+- Base model and parameter count
+- LoRA adapter configuration (rank, alpha, target modules)
+- Optimiser, LR schedule, and KL-divergence beta
+- Training data composition across the four tasks
+- Loss curve and reward curve (embedded inline as PNGs)
+- Held-out evaluation methodology — fresh seeds across all four tasks, crisis task as the load-bearing generalisation test
+- Before/after comparison: base model with 3-shot prompting vs. trained adapter, same evaluation set
+
+---
+
+## Out-of-distribution evaluation
+
+The point of the env is to distinguish an agent that has internalised the underlying world model from one that has memorised a sequence. The four tasks are not variants of a single scenario — each tests a distinct competency that the previous task does not exercise.
+
+Expected results once training completes:
+
+| Condition                          | Easy (target) | Medium (target) | Hard (target) | Crisis (target) |
+| ---------------------------------- | ------------- | --------------- | ------------- | --------------- |
+| Random policy                      | ≪ 0.60        | ≪ 0.55          | ≪ 0.45        | ≪ 0.50          |
+| Base model + 3-shot prompt         | TBD           | TBD             | TBD           | TBD             |
+| **GRPO-LoRA (ours)**               | **TBD**       | **TBD**         | **TBD**       | **TBD**         |
+
+Raw eval JSONs will be committed to `results/` once training is complete.
+
+---
+
+## Quick start
+
+### Hit the live env
+
+```bash
+# Health check
+curl https://huggingface.co/spaces/Swayam14/openenv-workforce/health
+
+# List tasks
+curl https://huggingface.co/spaces/Swayam14/openenv-workforce/tasks
+
+# Start a crisis episode
+curl -X POST https://huggingface.co/spaces/Swayam14/openenv-workforce/reset \
+  -H "Content-Type: application/json" \
+  -d '{"task_name": "crisis"}'
+
+# Submit an action
+curl -X POST https://huggingface.co/spaces/Swayam14/openenv-workforce/step \
+  -H "Content-Type: application/json" \
+  -d '{"action_type": "request_document", "target": "passport"}'
+
+# Get the random baseline
+curl https://huggingface.co/spaces/Swayam14/openenv-workforce/baseline
 ```
-GlobeFlowAI/
-├── env/
-│   ├── environment.py      # Core WorkforceEnv — reset/step/state
-│   ├── models.py           # Pydantic v2 typed models
-│   ├── validators.py       # Pure validation functions
-│   ├── reward.py           # Shaped reward function
-│   ├── tasks.py            # Task definitions (easy/medium/hard)
-│   ├── rules.py            # Re-export of rules engine
-│   ├── rules_engine.py     # Country rules, fixture loading
-│   └── graders.py          # Shim → graders/graders.py
-├── graders/
-│   └── graders.py          # Deterministic task graders
-├── server/
-│   └── app.py              # FastAPI entry point
-├── fixtures/
-│   ├── country_rules.json  # Per-country compliance rules
-│   ├── visa_types.json     # Visa type metadata
-│   └── tax_treaties.json   # India bilateral tax treaties
-├── main.py                 # FastAPI app with session management
-├── inference.py            # OpenAI-powered baseline agent
-├── openenv.yaml            # OpenEnv spec metadata
-├── Dockerfile              # Container definition
-└── requirements.txt        # Python dependencies
+
+### Run locally
+
+```bash
+git clone https://github.com/Swayam14/openenv-workforce.git
+cd openenv-workforce
+pip install -r requirements.txt
+pip install -e .
+python -m server.app          # serves on :7860
+pytest tests/ -q              # all tests should pass
 ```
 
-### State Design
+### Reproduce the eval *(once checkpoint is published)*
 
-The environment maintains a stateful `WorkforceState` with:
+```bash
+# Pull trained adapter from HF
+pip install huggingface_hub
+python -c "from huggingface_hub import snapshot_download; \
+  snapshot_download(repo_id='<team>/globeflowai-adapter', \
+  local_dir='checkpoints/final')"
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `case_id` | str | Unique case identifier |
-| `task_name` | str | easy / medium / hard |
-| `employee` | EmployeeRecord | Role and dependent status |
-| `countries` | list[str] | Destination countries (1–2) |
-| `documents` | dict | Document name → status + validity |
-| `departments` | dict | HR / Legal / Finance approval flags |
-| `compliance` | dict | tax_id / payroll / pdpa / shadow_payroll |
-| `conflicts` | list | Active rule conflicts (hard task) |
-| `deadline_days` | int | Steps remaining before auto-fail |
-| `progress` | float | Completion fraction [0.0, 1.0] |
-| `status` | str | in_progress / success / failed |
-
----
-
-## Action Space
-
-| Action Type | Target | Description |
-|-------------|--------|-------------|
-| `request_document` | document name | Submit a document for verification |
-| `verify_document` | document name | Verify a submitted document |
-| `approve_hr` | *(empty)* | HR department approval |
-| `approve_legal` | *(empty)* | Legal approval (requires all docs verified) |
-| `approve_finance` | *(empty)* | Finance approval (requires Legal + no conflicts) |
-| `set_payroll` | *(empty)* | Configure host-country payroll |
-| `set_tax_id` | *(empty)* | Register tax ID (Germany only — **not UAE**) |
-| `set_shadow_payroll` | *(empty)* | Enable shadow payroll (Singapore only) |
-| `set_pdpa` | *(empty)* | Collect PDPA consent (Singapore only) |
-| `resolve_conflict` | *(empty)* | Resolve a rule conflict (hard task) |
-| `finalize_case` | *(empty)* | Close the case (all requirements must be met) |
-
-**Action format:**
-```json
-{"action_type": "request_document", "target": "passport"}
-{"action_type": "approve_hr", "target": ""}
+# Run eval across all four tasks (GPU recommended)
+python scripts/eval.py \
+  --model-path checkpoints/final \
+  --tasks easy medium hard crisis \
+  --seeds 42 43 44 \
+  --out results/repro.json
 ```
-
----
-
-## Observation Space
-
-After every `reset()` and `step()`, the agent receives an `Observation` containing:
-
-| Field | Description |
-|-------|-------------|
-| `state` | Full `WorkforceState` (documents, departments, compliance, conflicts) |
-| `available_actions` | List of currently valid actions the agent can take |
-| `current_blockers` | Reasons `finalize_case` cannot be called yet |
-| `last_action_result` | Result code of the last action |
-| `last_action_error` | Error detail if last action failed |
-| `steps_taken` | Number of steps used this episode |
-| `done` | True when episode has ended |
 
 ---
 
 ## Tasks
 
-### Task 1 — Easy: India → Germany
+| Task       | Training distribution      | Success criteria                              |
+| ---------- | -------------------------- | --------------------------------------------- |
+| `easy`     | Germany relocation         | Episode score > 0.90                          |
+| `medium`   | Singapore relocation       | Episode score > 0.75, no rule violations      |
+| `hard`     | Germany + UAE relocation   | Episode score > 0.55, conflict resolved       |
+| `crisis`   | Germany + mid-ep reg event | Event acknowledged, ICT permit acquired       |
 
-**Scenario:** Relocate an Engineer from India to Germany via EU Blue Card pathway.
-
-| Property | Value |
-|----------|-------|
-| Countries | Germany |
-| Employee | Engineer, no dependents |
-| Documents required | passport, visa, employment_letter, work_permit |
-| Departments required | HR only |
-| Compliance required | tax_id, payroll |
-| Deadline | 20 steps |
-| Max steps | 25 |
-| Expected score range | 0.70 – 0.95 |
-
-**Optimal sequence (~11 steps):**
-```
-request + verify (x4 docs) → approve_hr → set_tax_id → set_payroll → finalize_case
-```
+Perfect play expected scores: easy ≈ 0.95 · medium ≈ 0.85 · hard ≈ 0.65 · crisis ≈ 0.75. Scores are lower on harder tasks because those tasks genuinely have more weighted requirements — there is no artificial cap.
 
 ---
 
-### Task 2 — Medium: India → Singapore
+## Action schema
 
-**Scenario:** Relocate a Manager with dependents from India to Singapore via Employment Pass.
+The action is a JSON dict submitted to `/step`:
 
-| Property | Value |
-|----------|-------|
-| Countries | Singapore |
-| Employee | Manager, has dependents |
-| Documents required | passport, visa, employment_letter |
-| Departments required | HR, Legal |
-| Compliance required | payroll, pdpa, shadow_payroll |
-| Deadline | 25 steps |
-| Max steps | 25 |
-| Expected score range | 0.40 – 0.75 |
-
-**Key rules:**
-- Singapore does **NOT** require tax_id — calling `set_tax_id` incurs a −0.30 penalty
-- PDPA consent must be collected before finalization
-- Shadow payroll is mandatory for home-country tax tracking
-- Legal must approve before `finalize_case`
-
-**Optimal sequence (~11 steps):**
+```json
+{
+  "action_type": "<see table below>",
+  "target": "<document name or country code, if applicable>"
+}
 ```
-request + verify (x3 docs) → approve_hr → approve_legal →
-set_payroll → set_pdpa → set_shadow_payroll → finalize_case
-```
+
+| `action_type`                | Description                                              |
+| ---------------------------- | -------------------------------------------------------- |
+| `request_document`           | Initiates a document request (target = document name)    |
+| `verify_document`            | Marks a previously requested document as verified        |
+| `get_hr_approval`            | Requests HR department approval                          |
+| `get_legal_approval`         | Requests Legal department approval                       |
+| `get_finance_approval`       | Requests Finance department approval                     |
+| `set_tax_id`                 | Registers a tax ID (target = country; rule-restricted)   |
+| `configure_payroll`          | Configures host-country payroll                          |
+| `resolve_conflict`           | Resolves a loaded conflict in the case state             |
+| `acknowledge_regulatory_change` | Clears a fired regulatory event (crisis task only)    |
+| `request_pdpa_consent`       | Requests PDPA data-protection consent (Singapore only)   |
+| `configure_shadow_payroll`   | Configures shadow payroll (Singapore only)               |
+| `finalise_case`              | Terminates the episode and triggers grader scoring       |
+
+Invalid actions (wrong target type, action not applicable to current state) return a structured error; the episode continues.
 
 ---
 
-### Task 3 — Hard: India → Germany + UAE
+## Reward function
 
-**Scenario:** Simultaneous relocation of a Director with dependents to both Germany and UAE.
+### Per-step reward
 
-| Property | Value |
-|----------|-------|
-| Countries | Germany, UAE |
-| Employee | Director, has dependents |
-| Documents required | passport, visa, employment_letter, work_permit |
-| Departments required | HR, Legal, Finance |
-| Compliance required | tax_id (Germany only), payroll |
-| Deadline | 30 steps |
-| Max steps | 25 |
-| Expected score range | 0.20 – 0.60 |
+| Event                                        | Reward             |
+| -------------------------------------------- | ------------------ |
+| Document verified (weighted by task)         | +0.05 to +0.15     |
+| Department approval obtained                 | +0.10              |
+| Category milestone completed                 | +0.15 bonus        |
+| Progress delta (vs. prior step, capped)      | up to +0.20        |
+| Rule violation (e.g., `set_tax_id` in UAE)   | −0.30              |
+| Redundant / out-of-scope action              | −0.03 (cap −0.15)  |
 
-**Critical trap — UAE has NO income tax:**
-> ⚠️ Calling `set_tax_id` with target `UAE` is a **rule violation** that incurs a −0.30 reward penalty AND reduces the final grader score significantly. Agents must learn to call `set_tax_id` for Germany ONLY.
+### Episode-end grader score
 
-**Key rules:**
-- A `tax_conflict` exists between Germany (requires tax_id) and UAE (no income tax)
-- `resolve_conflict` must be called **before** `approve_finance`
-- Finance cannot approve while unresolved conflicts remain
-- All 4 documents must be verified before Legal can approve
+| Component                          | Weight   |
+| ---------------------------------- | -------- |
+| Document completion                | 0.30     |
+| Departmental approvals             | 0.25     |
+| Compliance requirements            | 0.25     |
+| Conflict resolution (hard/crisis)  | 0.20     |
 
-**Optimal sequence (~14 steps):**
-```
-request + verify (x4 docs) → approve_hr → approve_legal →
-set_tax_id (Germany) → set_payroll → resolve_conflict →
-approve_finance → finalize_case
-```
+Grader score is clamped to (0.0, 1.0). Every constant-action strategy scores below a minimally-informed random policy on the full task suite.
 
 ---
 
-## Reward Function
+## Empirical sanity checks
 
-### Per-Step Rewards
+**Random baseline (uniform action sampling, n=20 per task):**
 
-| Event | Reward |
-|-------|--------|
-| Successful action | +0.30 |
-| Document verified (milestone) | +0.20 bonus |
-| Department approved (milestone) | +0.20 bonus |
-| Compliance item set (milestone) | +0.15 bonus |
-| Conflict resolved (milestone) | +0.25 bonus |
-| Episode finalized successfully | +0.50 bonus |
-| Progress increase | +0.05 × delta |
-| Wrong action (valid type, wrong context) | −0.10 |
-| Prerequisite violated | −0.20 |
-| Rule violation (e.g. UAE tax) | −0.30 |
-| Invalid action (unknown type) | −0.30 |
-| Repeated action | −0.10 |
+| Task    | Mean episode score | Rule violations / ep |
+| ------- | ------------------ | -------------------- |
+| easy    | < 0.25             | ~3                   |
+| medium  | < 0.20             | ~5                   |
+| hard    | < 0.15             | ~7                   |
+| crisis  | < 0.20             | ~4                   |
 
-All per-step rewards are clamped to `[−1.0, 1.0]`.
+Random is well below chance on all tasks.
 
-### Partial Progress Shaping
+**Adversarial robustness:** malformed JSON, unknown `action_type` values, missing `target` fields, oversized payloads, negative seeds, and concurrent `/reset` calls have all been probed. The server returns structured 4xx errors, never 500s. No stack-trace leaks.
 
-The reward function provides dense signal throughout the episode — not just at the end. Progress is computed as a weighted sum:
+**Determinism:** `reset(seed=N)` twice returns the same initial observation and the same crisis-event timing. Confirmed across all four tasks and multiple seeds.
 
-- Documents: 40%
-- Departments: 35%
-- Compliance: 15%
-- Conflict resolution: 10%
-
-This means agents receive gradient signal even when they never reach `finalize_case`.
+**Crisis clock integrity:** verified that the crisis event fires on `_steps_taken == 8`, not on wall-clock time or total API calls. Penalty steps do not advance the counter.
 
 ---
 
-## Grader System
+## Architecture
 
-Each task has a deterministic grader that returns a score strictly in `(0.0, 1.0)` — exclusive bounds required by the OpenEnv validator.
+```
+[ Relocation case state ]  ──►  [ Agent ]
+  (partially-observable,           (any LLM or policy,
+   rule-loaded, multi-country)      submits JSON action dict)
+                                          │
+                                          ▼
+                                   action_type + target
+                                          │
+                                          ▼
+                              [ Per-step reward + next obs ]
+                                          │
+                             (on finalise_case or budget exhaustion)
+                                          │
+                                          ▼
+                                  [ Grader score ]
+                              (weighted requirement completion)
+```
 
-### Easy Grader Weights
-| Component | Weight |
-|-----------|--------|
-| Documents verified (4 docs) | 0.40 |
-| HR approved | 0.25 |
-| Compliance done (tax_id + payroll) | 0.25 |
-| Case finalized | 0.10 |
-| Ceiling | 0.949 |
-
-### Medium Grader Weights
-| Component | Weight |
-|-----------|--------|
-| Documents verified (3 docs) | 0.30 |
-| HR approved | 0.15 |
-| Legal approved | 0.20 |
-| Compliance done (payroll + pdpa + shadow) | 0.25 |
-| Case finalized | 0.10 |
-| Ceiling | 0.749 |
-
-### Hard Grader Weights
-| Component | Weight |
-|-----------|--------|
-| Documents verified (4 docs) | 0.25 |
-| HR approved | 0.08 |
-| Legal approved | 0.08 |
-| Finance approved | 0.08 |
-| Compliance done (tax_id + payroll) | 0.16 |
-| Conflict resolved | 0.15 |
-| Case finalized | 0.10 |
-| UAE tax violation penalty | −0.25 |
-| Ceiling | 0.599 |
+The case state is deterministic Python — ground-truth rule labels are always known. This is deliberate: controlled rule-sets are the only way to measure whether an agent actually learns the rules vs. memorises a sequence. Any LLM or policy can plug in as the agent.
 
 ---
 
-## HTTP API
+## Limitations we report honestly
 
-The environment runs as a FastAPI server on port 7860.
-
-### Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/` | Health check — returns `{"status": "ok"}` |
-| GET | `/health` | Health check (explicit) |
-| GET | `/tasks` | List available tasks |
-| POST | `/reset` | Start new episode `{"task_name": "easy"}` |
-| POST | `/step` | Apply action `{"action_type": "...", "target": "..."}` |
-| GET | `/state` | Current state (query param `?session_id=...`) |
-| POST | `/grade` | Get current grader score |
-
-### Example
-
-```bash
-# Reset
-curl -X POST http://localhost:7860/reset \
-  -H "Content-Type: application/json" \
-  -d '{"task_name": "easy"}'
-
-# Step
-curl -X POST http://localhost:7860/step \
-  -H "Content-Type: application/json" \
-  -d '{"action_type": "request_document", "target": "passport"}'
-
-# Grade
-curl -X POST http://localhost:7860/grade \
-  -H "Content-Type: application/json" \
-  -d '{}'
-```
+- **Training is incomplete at submission time.** The reference LoRA numbers are not yet available. This section will be updated with full results, curves, and checkpoint links before the deadline.
+- **Doers are deterministic Python policies, not LLM-driven.** This is a controlled lab. Extending to LLM-generated adversarial cases (e.g., ambiguous observations, contradictory document states) is a planned extension.
+- **Crisis library has one scenario.** The Blue Card suspension is the only regulatory event in v1. Generalisation across multiple distinct crisis types is future work.
+- **Parsimony penalty interaction with base model size is empirically unexplored.** We expect it to be a meaningful signal separating trained from untrained agents, but have not yet measured this across model scales.
 
 ---
 
-## Setup & Usage
+## Future work
 
-### Prerequisites
-
-- Python 3.11+
-- Docker
-- OpenAI API key
-
-### Local Installation
-
-```bash
-# Clone the repo
-git clone https://github.com/Swayam14/openenv-workforce
-cd openenv-workforce
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set environment variables
-export HF_TOKEN=your_openai_api_key
-export API_BASE_URL=https://api.openai.com/v1
-export MODEL_NAME=gpt-4o-mini
-
-# Start the server
-uvicorn main:app --host 0.0.0.0 --port 7860
-```
-
-### Run the Baseline Agent
-
-```bash
-python inference.py
-```
-
-### Run Tests
-
-```bash
-python test_eval.py
-```
-
-### Docker
-
-```bash
-# Build
-docker build -t globeflowai .
-
-# Run
-docker run -p 7860:7860 \
-  -e HF_TOKEN=your_openai_api_key \
-  -e API_BASE_URL=https://api.openai.com/v1 \
-  -e MODEL_NAME=gpt-4o-mini \
-  globeflowai
-```
+- Richer crisis library — multiple distinct regulatory event types beyond Blue Card
+- LLM-in-the-loop adversarial case generation
+- Committee-based agent (multiple sub-agents debate before submitting action)
+- Multi-step conflict resolution (conflict distributed across several jurisdictions)
+- Port workflow pattern to adjacent domains: cross-border procurement, regulatory filings, IP transfers
+- Empirical study of parsimony penalty interaction with base model size
 
 ---
 
-## Baseline Scores
+## Citation
 
-Running `python inference.py` with `gpt-4o-mini`:
+If you use GlobeFlowAI in research, please cite:
 
 ```
-EASY     | score=0.780 | steps=14 | success
-MEDIUM   | score=0.750 | steps=13 | success
-HARD     | score=0.600 | steps=15 | success
-
-Average Score: 0.710
+@software{globeflowai2026,
+  title  = {GlobeFlowAI: An OpenEnv environment for AI-driven global mobility workflows},
+  author = {Team AI Kalesh},
+  year   = {2026},
+  url    = {https://github.com/Swayam14/openenv-workforce}
+}
 ```
 
-### Score Interpretation
-
-| Task | Score Range | Difficulty | Why |
-|------|-------------|------------|-----|
-| Easy | 0.70 – 0.95 | Low | Single country, only HR needed, no compliance traps |
-| Medium | 0.40 – 0.75 | Medium | Singapore-specific rules, PDPA + shadow payroll |
-| Hard | 0.20 – 0.60 | High | Multi-country conflict, UAE tax trap, Finance required |
-
-Scores decrease with task difficulty, reflecting the increasing number of rules the agent must learn and the cost of mistakes like calling `set_tax_id` for UAE (−0.30 reward + grader penalty).
-
----
-
-## Country Rules Summary
-
-| Rule | Germany | Singapore | UAE |
-|------|---------|-----------|-----|
-| Visa required | ✓ | ✓ | ✓ |
-| Tax ID required | ✓ | ✗ | ✗ (**no income tax**) |
-| Payroll required | ✓ | ✓ | ✓ |
-| PDPA consent | ✗ | ✓ | ✗ |
-| Shadow payroll | ✗ | ✓ | ✗ |
-| Finance approval | ✓ | ✗ | ✓ |
-
----
-
-## OpenEnv Spec Compliance
-
-- ✅ `reset()` → returns typed `Observation`
-- ✅ `step(action)` → returns typed `StepResult` with `observation`, `reward`, `done`, `info`
-- ✅ `state()` → returns typed `WorkforceState`
-- ✅ Pydantic v2 typed models throughout
-- ✅ `openenv.yaml` with task registry
-- ✅ Dockerfile builds and runs cleanly
-- ✅ FastAPI server on port 7860
-- ✅ `/health` endpoint responds to HuggingFace Space ping
-- ✅ All grader scores strictly between 0 and 1 (exclusive)
-- ✅ `inference.py` uses OpenAI client with `API_BASE_URL`, `MODEL_NAME`, `HF_TOKEN`
-- ✅ `[START]` / `[STEP]` / `[END]` stdout logging format
-
----
-
-## Team
-
-**Team AI Kalesh**
-
-Built for the Meta × Scaler OpenEnv AI Hackathon — India 2026.
+Built at the Meta PyTorch × OpenEnv Hackathon 2026, Scaler School of Technology.
 
 ---
 

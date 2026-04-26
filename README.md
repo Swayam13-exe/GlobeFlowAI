@@ -26,7 +26,7 @@ Built for the **Meta x Scaler OpenEnv AI Hackathon 2026** by **Team AI Kalesh**.
 
 - **Live HF Space:** https://huggingface.co/spaces/Swayam14/openenv-workforce
 - **Source code:** https://github.com/Swayam14/openenv-workforce
-- **Training notebook (Colab):** _placeholder — link to be added once the notebook is published_
+- **Training notebook (Colab):** https://colab.research.google.com/drive/1kbgXAKEm72ZbbUQ89KeUUeeRbu2Hldce
 - **Training results plot:** [`assets/training_results.png`](assets/training_results.png)
 - **Blog post:** [`blog/globeflowai_blog.md`](blog/globeflowai_blog.md)
 - **Team:** Team AI Kalesh

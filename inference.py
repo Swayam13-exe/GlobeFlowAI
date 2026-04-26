@@ -89,21 +89,50 @@ def log_regulatory_event_banner(event: dict) -> None:
     """
     title = event.get("title", "Regulatory Event")
     desc  = event.get("description", "")
+
+    # Box width: 60 characters of content between ║ borders
+    WIDTH = 60
     print("", flush=True)
-    print("🚨" * 30, flush=True)
-    print("🚨" + " " * 56 + "🚨", flush=True)
-    print(f"🚨   REGULATORY EVENT FIRED: {title[:25]:<28}🚨", flush=True)
-    print("🚨" + " " * 56 + "🚨", flush=True)
-    print("🚨" * 30, flush=True)
-    # Wrap description into ~55-char lines for clean terminal output
-    wrapped = textwrap.wrap(desc, width=56)
-    for line in wrapped[:5]:  # cap at 5 lines
-        print(f"   {line}", flush=True)
-    print("", flush=True)
-    print("   ⚠️  The agent must now:", flush=True)
-    print("      1. Call acknowledge_regulatory_change", flush=True)
-    print("      2. Request and verify ict_permit (replaces visa)", flush=True)
-    print("      3. NEVER use the old visa document again", flush=True)
+    print("╔" + "═" * (WIDTH + 2) + "╗", flush=True)
+    print("║ " + " " * WIDTH + " ║", flush=True)
+    # Center the "REGULATORY EVENT FIRED" header
+    header = "🚨  REGULATORY EVENT FIRED  🚨"
+    # rjust/ljust don't handle emoji width perfectly, so pad manually
+    # Emojis take 2 visible cols each, there are 2 of them
+    visible_len = len("  REGULATORY EVENT FIRED  ") + 2 * 2  # 2 emojis × 2 cols
+    pad = (WIDTH - visible_len) // 2
+    print("║ " + " " * pad + header + " " * (WIDTH - visible_len - pad) + " ║", flush=True)
+    print("║ " + " " * WIDTH + " ║", flush=True)
+
+    # Title line (truncated or wrapped)
+    title_line = f"Event: {title}"
+    if len(title_line) > WIDTH:
+        title_line = title_line[:WIDTH - 3] + "..."
+    print("║ " + title_line.ljust(WIDTH) + " ║", flush=True)
+    print("║ " + " " * WIDTH + " ║", flush=True)
+
+    # Description — word-wrap cleanly to WIDTH
+    wrapped = textwrap.wrap(desc, width=WIDTH)
+    for line in wrapped[:4]:
+        print("║ " + line.ljust(WIDTH) + " ║", flush=True)
+
+    print("║ " + " " * WIDTH + " ║", flush=True)
+    # Action items
+    for line in [
+        "⚠️  Agent must now:",
+        "   1. Call acknowledge_regulatory_change",
+        "   2. Request and verify ict_permit (replaces visa)",
+        "   3. NEVER use the old visa document again",
+    ]:
+        # Account for emoji width in the warning line
+        pad_line = line
+        if "⚠️" in line:
+            # ⚠️ is 2 cols wide but 3 chars in Python len()
+            print("║ " + line + " " * (WIDTH - len(line) + 1) + " ║", flush=True)
+        else:
+            print("║ " + line.ljust(WIDTH) + " ║", flush=True)
+    print("║ " + " " * WIDTH + " ║", flush=True)
+    print("╚" + "═" * (WIDTH + 2) + "╝", flush=True)
     print("", flush=True)
 
 
